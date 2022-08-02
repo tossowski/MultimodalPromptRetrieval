@@ -25,6 +25,9 @@ import warnings
 import h5py
 from PIL import Image
 import argparse
+import pickle
+import networkx as nx
+import dgl
 
 
 with warnings.catch_warnings():
@@ -108,6 +111,8 @@ class Dictionary(object):
     def __len__(self):
         return len(self.idx2word)
 
+
+
 def _create_entry(img, data, answer):
     if None!=answer:
         answer.pop('img_name')
@@ -122,6 +127,14 @@ def _create_entry(img, data, answer):
         'answer_type' : data['answer_type'],
         'question_type': data['content_type']
         }
+
+    if 'keywords' in data:
+        keywords = data['keywords'].lower().replace(",", " ")
+        entry['keywords'] = keywords
+    if 'related_info' in data:
+        entry['related_info'] = data['related_info']
+    if 'graph_id' in data:
+        entry['graph_id'] = data['graph_id']
     return entry
 
 def is_json(myjson):
@@ -131,15 +144,22 @@ def is_json(myjson):
     return False
   return True
 
-def _load_dataset(dataroot, name, img_id2val, label2ans):
+def _load_dataset(dataroot, name, img_id2val, label2ans, method="normal"):
     """Load entries
 
     img2id: dict {img -> id} id can be used to retrieve image or features
     dataroot: root path of dataset
     name: 'train', 'val', 'test'
     """
-    data_path = os.path.join(dataroot, name + '.json')
+    if method == "keywords_only" or method == "keywords_and_normal" or method == "related_info":
+        data_path = os.path.join(dataroot, name + '_with_keywords.json')
+    else:
+        data_path = os.path.join(dataroot, name + '.json')
+    
     samples_all = json.load(open(data_path))
+    if method == "GCN":
+        for i in range(len(samples_all)):
+            samples_all[i]["graph_id"] = i
     samples = [sample for sample in samples_all if sample['q_lang']=="en"]
     samples = sorted(samples, key=lambda x: x['qid'])
 
@@ -160,9 +180,10 @@ def _load_dataset(dataroot, name, img_id2val, label2ans):
 
 
 class VQASLAKEFeatureDataset(Dataset):
-    def __init__(self, name, cfg, dictionary, dataroot='data'):
+    def __init__(self, name, cfg, dictionary, dataroot='data', method="normal"):
         super(VQASLAKEFeatureDataset, self).__init__()
         question_len = cfg.TRAIN.QUESTION.LENGTH
+        self.method = method
         self.cfg = cfg
         self.name = name
         assert name in ['train', 'test']
@@ -178,13 +199,20 @@ class VQASLAKEFeatureDataset(Dataset):
         self.num_close_candidates = len(self.label2close)
         self.num_ans_candidates = self.num_open_candidates + self.num_close_candidates
 
+        # Load Graph Data
+        if self.method == "GCN":
+            with open(os.path.join(dataroot, f'graphs_{name}.pkl'), 'rb') as f:
+                list_of_dicts = pickle.load(f)
+                self.graphs = [nx.node_link_graph(graph) for graph in list_of_dicts]
+                
+
         # End get the number of answer type class
         self.dictionary = dictionary
 
         # TODO: load img_id2idx
         self.img_id2idx = json.load(open(os.path.join(dataroot, 'imgid2idx.json')))
 
-        self.entries = _load_dataset(dataroot, name, self.img_id2idx, self.label2ans)
+        self.entries = _load_dataset(dataroot, name, self.img_id2idx, self.label2ans, self.method)
         
          # load image data for MAML module
         if self.cfg.TRAIN.VISION.MAML:
@@ -207,14 +235,56 @@ class VQASLAKEFeatureDataset(Dataset):
             self.clip_images_data = cPickle.load(open(images_path, 'rb'))
         
         # tokenization
+        
         self.tokenize(question_len)
+        if self.method == "keywords_only" or self.method == "keywords_and_normal":
+            self.tokenize(question_len,'keywords','q_keywords')
+        elif self.method == "related_info":
+            self.tokenize(question_len,'related_info','q_related_info')
         self.tensorize()
         if cfg.TRAIN.VISION.AUTOENCODER and cfg.TRAIN.VISION.MAML:
             self.v_dim = cfg.TRAIN.VISION.V_DIM * 2
         else:
             self.v_dim = cfg.TRAIN.VISION.V_DIM  # see the V_DIM defined in config fiels
 
-    def tokenize(self, max_length):
+        if self.method == "GCN":
+            from language.language_model import WordEmbedding
+            self.w_emb = WordEmbedding(self.dictionary.ntoken, 300, .0, False).requires_grad_(False)
+            self.build_graphs()
+
+    def build_graphs(self):
+
+        for entry in self.entries:
+            graph_id = entry['graph_id']
+            graph = self.graphs[graph_id]
+
+            node_tokens = []
+            for k, v in graph.nodes.items():
+                word = v['word']
+                node_tokens.append(self.dictionary.tokenize(word, False))
+
+            node_feats = []
+            for node_token in node_tokens:
+                tokens = torch.unsqueeze(torch.LongTensor(np.array(node_token)), 1)
+                emb = self.w_emb(tokens).squeeze()
+                if len(emb.shape) > 1:
+                    emb = torch.mean(emb, axis=0)
+                node_feats.append(torch.unsqueeze(emb, 0))
+
+            g = dgl.graph([])
+            g.add_nodes(graph.number_of_nodes())
+            g.ndata['node_feats'] = torch.cat(node_feats, 0)
+
+            if len(graph.edges) == 0:
+                self.graphs[graph_id] = g
+                continue
+            
+            src, dst = tuple(zip(*graph.edges))
+            g.add_edges(src, dst)
+            self.graphs[graph_id] = g
+
+
+    def tokenize(self, max_length, col_name='question', target_name='q_token'):
         """Tokenizes the questions.
 
         This will add q_token in each entry of the dataset.
@@ -223,23 +293,23 @@ class VQASLAKEFeatureDataset(Dataset):
         
         for entry in self.entries:
             if self.cfg.TRAIN.QUESTION.CLIP:
-                clip_tokens = clip.tokenize(entry['question'], context_length=max_length)
+                clip_tokens = clip.tokenize(entry[col_name], context_length=max_length)
                 clip_tokens = clip_tokens.tolist()[0]
                 if len(clip_tokens) < max_length:
                     # Note here we pad in front of the sentence
                     padding = [self.dictionary.padding_idx] * (max_length - len(clip_tokens))
                     clip_tokens = clip_tokens + padding
-                    entry['clip_q_token'] = clip_tokens
+                    entry[f'clip_{target_name}'] = clip_tokens
                 utils.assert_eq(len(clip_tokens), max_length)
             
-            tokens = self.dictionary.tokenize(entry['question'], False)
+            tokens = self.dictionary.tokenize(entry[col_name], False)
             tokens = tokens[:max_length]
             if len(tokens) < max_length:
                 # Note here we pad in front of the sentence
                 padding = [self.dictionary.padding_idx] * (max_length - len(tokens))
                 tokens = tokens + padding
             utils.assert_eq(len(tokens), max_length)
-            entry['q_token'] = tokens
+            entry[target_name] = tokens
 
     def tensorize(self):
         if self.cfg.TRAIN.VISION.MAML:
@@ -252,8 +322,11 @@ class VQASLAKEFeatureDataset(Dataset):
             self.clip_images_data = torch.from_numpy(self.clip_images_data)
             self.clip_images_data = self.clip_images_data.type('torch.FloatTensor')
         for entry in self.entries:
-            question = np.array(entry['q_token'])
-            entry['q_token'] = question
+            for key in entry:
+                if key.startswith("q_"):
+                    question = np.array(entry[key])
+                    entry[key] = question
+
             if self.cfg.TRAIN.QUESTION.CLIP:
                 clip_question = np.array(entry['clip_q_token'])
                 entry['clip_q_token'] = clip_question
@@ -297,11 +370,22 @@ class VQASLAKEFeatureDataset(Dataset):
         if self.cfg.TRAIN.QUESTION.CLIP:
             question_data[1] = entry['clip_q_token']
 
+        assert self.method in ["normal", "keywords_only", "no_question", "keywords_and_normal", "related_info", "GCN"]
+        if self.method == "keywords_only":
+            question_data[0] = entry['q_keywords']
+        elif self.method == "no_question":
+            question_data[0] = np.zeros_like(question_data[0])
+        elif self.method == "keywords_and_normal":
+            question_data.append(entry['q_keywords'])
+        elif self.method == "related_info":
+            question_data.append(entry['q_related_info'])
+        elif self.method == "GCN":
+            question_data.append(entry['graph_id'])
+
         if answer_type == 'CLOSED':
             answer_target = 0
         else :
             answer_target = 1
-
         if None!=answer:
             labels = answer['labels']
             scores = answer['scores']
@@ -323,7 +407,7 @@ class VQASLAKEFeatureDataset(Dataset):
         else:
             if self.name == "test":
                 return image_data, question_data, answer_type, question_type, phrase_type, answer_target, entry['image_name'], entry['question'], entry['answer_text']
-            else:
+            else: 
                 return image_data, question_data, answer_type, question_type, phrase_type, answer_target
 
     def __len__(self):

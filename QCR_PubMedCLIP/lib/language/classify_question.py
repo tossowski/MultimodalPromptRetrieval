@@ -62,10 +62,13 @@ class QuestionAttention(nn.Module):
             question = question.unsqueeze(1)
             question = question.expand(-1, 77, -1)
         concated = torch.cat([context, question], -1)  # b * 12 * 300 + 1024 / or 512 if clip
-        concated = torch.mul(torch.tanh(self.tanh_gate(concated)), torch.sigmoid(self.sigmoid_gate(concated)))  #b*12*1024 / or b*77*512 if clip
-        a = self.attn(concated) # #b*12*1  / or b*77*1 if clip
-        attn = F.softmax(a.squeeze(), 1) #b*12 / or b*77 if clip
 
+        concated = torch.mul(torch.tanh(self.tanh_gate(concated)), torch.sigmoid(self.sigmoid_gate(concated)))  #b*12*1024 / or b*77*512 if clip
+        
+        a = self.attn(concated) # #b*12*1  / or b*77*1 if clip
+        #print(a.shape)
+        attn = F.softmax(a.squeeze(), 1) #b*12 / or b*77 if clip
+        #print(concated.shape, a.shape, attn.shape, question.shape)
         ques_attn = torch.bmm(attn.unsqueeze(1), question).squeeze() #b*1024 / or b*512 if clip
 
         return ques_attn
@@ -86,8 +89,9 @@ class typeAttention(nn.Module):
         question = question[0]
         w_emb = self.w_emb(question)
         q_emb = self.q_emb.forward_all(w_emb)  # [batch, q_len, q_dim]
+        
         q_final = self.q_final(w_emb, q_emb)  # b, 1024
-
+        #print(w_emb.shape, q_emb.shape, q_final.shape)
         x_f = self.f_fc1(q_final)
         x_f = F.relu(x_f)
         x_f = self.f_fc2(x_f)

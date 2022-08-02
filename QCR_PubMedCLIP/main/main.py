@@ -61,12 +61,13 @@ if __name__ == '__main__':
         train_dataset = VQARADFeatureDataset('train', cfg,d,dataroot=data_dir)
         val_dataset = VQARADFeatureDataset('test', cfg,d,dataroot=data_dir)
     elif cfg.DATASET.DATASET == "SLAKE":
-        train_dataset = VQASLAKEFeatureDataset('train', cfg,d,dataroot=data_dir)
-        val_dataset = VQASLAKEFeatureDataset('test', cfg,d,dataroot=data_dir)
+        train_dataset = VQASLAKEFeatureDataset('train', cfg,d,dataroot=data_dir, method=cfg.METHOD)
+        val_dataset = VQASLAKEFeatureDataset('test', cfg,d,dataroot=data_dir, method=cfg.METHOD)
     else:
         raise ValueError(f"Dataset {cfg.DATASET.DATASET} is not supported!")
     drop_last = False
     drop_last_val = False 
+
     train_loader = DataLoader(train_dataset, cfg.TRAIN.BATCH_SIZE, shuffle=True, num_workers=2,drop_last=drop_last,
             pin_memory=True)
     val_loader = DataLoader(val_dataset, cfg.TEST.BATCH_SIZE, shuffle=True, num_workers=2,drop_last=drop_last_val,
@@ -90,7 +91,7 @@ if __name__ == '__main__':
         model = BAN_Model(val_dataset, cfg, device)
         model_data = torch.load(cfg.TEST.MODEL_FILE)
         model.load_state_dict(model_data.get('model_state', model_data), strict=False)
-        test(cfg, model, question_classify, val_loader, train_dataset.num_close_candidates, args.device)
+        test(cfg, model, question_classify, val_loader, train_dataset.num_close_candidates, args.device, label2ans = val_dataset.label2ans)
     else:
         model = BAN_Model(train_dataset, cfg, device)
         train(cfg, model, question_classify, train_loader, val_loader, train_dataset.num_close_candidates, args.device)

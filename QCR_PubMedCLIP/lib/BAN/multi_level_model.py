@@ -18,7 +18,7 @@ from torch.nn.utils.weight_norm import weight_norm
 from language.classify_question import typeAttention 
 import clip
 import os
-
+from BAN.graph_model import GraphModel
 
 # Bilinear Attention
 class BiAttention(nn.Module):
@@ -37,9 +37,11 @@ class BiAttention(nn.Module):
         v_num = v.size(1)
         q_num = q.size(1)
         logits = self.logits(v, q)  # b x g x v x q
+        #print(v_num, q_num, logits.shape)
 
         if v_mask:
             mask = (0 == v.abs().sum(2)).unsqueeze(1).unsqueeze(3).expand(logits.size())
+            #print(mask.shape, v.shape)
             logits.data.masked_fill_(mask.data, -float('inf'))
 
         p = nn.functional.softmax(logits.view(-1, self.glimpse, v_num * q_num), 2)
@@ -78,13 +80,13 @@ class BiResNet(nn.Module):
             b_emb[g] = self.b_net[g].forward_with_weights(v_emb, q_emb, att_p[:,g,:,:]) # b x l x h
             # atten, _ = logits[:,g,:,:].max(2)
             q_emb = self.q_prj[g](b_emb[g].unsqueeze(1)) + q_emb
+        #print(q_emb.shape, q_emb.sum(1).shape)
         return q_emb.sum(1)
 
 
 def seperate(v,q,a,att, answer_target, n_unique_close):     #q: b x 12 x 1024  v:  b x 1 x 128 answer_target : 1 x b
     indexs_open = []
     indexs_close = []
-
     for i in range(len(answer_target)):
         if answer_target[i]==0:
             indexs_close.append(i)
@@ -104,9 +106,21 @@ class BAN_Model(nn.Module):
         self.cfg = cfg
         self.dataset = dataset
         self.device = device
+
+        q_hid_size = cfg.TRAIN.QUESTION.HID_DIM
+        if self.cfg.METHOD == "GCN":
+            self.graph_model = GraphModel()
+        # if self.cfg.METHOD in ["keywords_and_normal", "related_info"]:
+        #     q_hid_size = cfg.TRAIN.QUESTION.HID_DIM // 2
+        # else:
+        #     q_hid_size = cfg.TRAIN.QUESTION.HID_DIM
+
         # init word embedding module, question embedding module, biAttention network, bi_residual network, and classifier
         self.w_emb = WordEmbedding(dataset.dictionary.ntoken, 300, .0, cfg.TRAIN.QUESTION.CAT)
-        self.q_emb = QuestionEmbedding(600 if cfg.TRAIN.QUESTION.CAT else 300, cfg.TRAIN.QUESTION.HID_DIM, 1, False, .0, cfg.TRAIN.QUESTION.RNN)
+        self.q_emb = QuestionEmbedding(600 if cfg.TRAIN.QUESTION.CAT else 300, q_hid_size, 1, False, .0, cfg.TRAIN.QUESTION.RNN)
+
+        self.k_emb = WordEmbedding(dataset.dictionary.ntoken, 300, .0, cfg.TRAIN.QUESTION.CAT)
+        self.keywords_emb = QuestionEmbedding(600 if cfg.TRAIN.QUESTION.CAT else 300, q_hid_size, 1, False, .0, cfg.TRAIN.QUESTION.RNN)
 
         # for close att+ resnet + classify
         self.close_att = BiAttention(dataset.v_dim, cfg.TRAIN.QUESTION.HID_DIM, cfg.TRAIN.QUESTION.HID_DIM, cfg.TRAIN.ATTENTION.GLIMPSE)
@@ -177,17 +191,37 @@ class BAN_Model(nn.Module):
         if self.cfg.TRAIN.VISION.OTHER_MODEL:
             pass
 
+
+        
         # get type attention
         type_att = self.typeatt(q)
         # get lextual feature    global 
+
         w_emb = self.w_emb(q[0])
+        
         q_emb = self.q_emb.forward_all(w_emb) # [batch, q_len, q_dim]
 
-        # get open & close feature
-        v_open, v_close, q_open, q_close,a_open, a_close, typeatt_open, typeatt_close, _, _ = seperate(v_emb,q_emb,a,type_att, answer_target, self.dataset.num_close_candidates)
+        if self.cfg.METHOD in ["keywords_and_normal", "related_info"]:
+            keyword_emb  = self.k_emb(q[2])
+            keywords_emb = self.keywords_emb.forward_all(keyword_emb)
+            q_emb = torch.cat((q_emb, keywords_emb), 1)
 
+        elif self.cfg.METHOD == "GCN":
+            logits = self.graph_model(q[2])
+            q_emb = torch.cat((q_emb, logits[:,None,:]), 1)
+            # print(q_emb.shape)
+            # print(logits.shape)
+
+        #print(q_emb.shape, keywords_emb.shape)
+
+        # get open & close feature
+        #v_open, v_close, q_open, q_close,a_open, a_close, typeatt_open, typeatt_close, _, _ = seperate(v_emb,q_emb,a,type_att, answer_target, self.dataset.num_close_candidates)
+        
+        v_open, v_close, q_open, q_close,a_open, a_close, typeatt_open, typeatt_close, _, _ = seperate(v_emb,q_emb,a,type_att, answer_target, self.dataset.num_close_candidates)
+        
         # diverse Attention -> (open + close)
         att_close, _ = self.close_att(v_close,q_close)
+        
         att_open, _ = self.open_att(v_open,q_open)
 
         # bilinear residual network
@@ -233,9 +267,20 @@ class BAN_Model(nn.Module):
 
         # get type attention
         type_att = self.typeatt(q)
+
         # get lextual feature    global 
         w_emb = self.w_emb(q[0])
         q_emb = self.q_emb.forward_all(w_emb) # [batch, q_len, q_dim]
+
+        if self.cfg.METHOD in ["keywords_and_normal", "related_info"]:
+            keyword_emb  = self.k_emb(q[2])
+            keywords_emb = self.keywords_emb.forward_all(keyword_emb)
+            q_emb = torch.cat((q_emb, keywords_emb), 1)
+        
+        elif self.cfg.METHOD == "GCN":
+            logits = self.graph_model(q[2])
+            q_emb = torch.cat((q_emb, logits[:,None,:]), 1)
+
         # get open & close feature
         answer_target = classify(q)
         _,predicted=torch.max(answer_target,1)
@@ -244,6 +289,7 @@ class BAN_Model(nn.Module):
         # diverse Attention -> (open + close)
         att_close, _ = self.close_att(v_close,q_close)
         att_open, _ = self.open_att(v_open,q_open)
+        #print(v_close.shape, q_close.shape, att_close.shape)
 
         # bilinear residual network
         last_output_close = self.close_resnet(v_close,q_close,att_close)

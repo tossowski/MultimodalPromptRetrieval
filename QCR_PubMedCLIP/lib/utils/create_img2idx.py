@@ -14,17 +14,31 @@ def create_img2idx(train_json_path, val_json_path, out_json_path):
     with open(train_json_path) as f:
             data = json.load(f)
     train = pd.DataFrame(data)
-    train_en = train[train['q_lang']=="en"]
+    if 'q_lang' not in train.columns:
+        print("No q_lang column")
+        train_en = train
+    else:
+        train_en = train[train['q_lang']=="en"]
     with open(val_json_path) as f:
             data = json.load(f)
     val =  pd.DataFrame(data)
-    val_en = val[val['q_lang']=="en"]
+    if 'q_lang' not in val.columns:
+        val_en = val
+    else:
+        val_en = val[val['q_lang']=="en"]
     img2idx = {}
     df = train_en.append(val_en)
-    df_imgs = df['img_name'].unique().tolist()
+
+    if 'image_name' in df.columns:
+        df_imgs = df['image_name'].unique().tolist()
+    else: 
+        df_imgs = df['img_name'].unique().tolist()
 
     for i, row in tqdm(df.iterrows()):
-        img_name = row['img_name']
+        if 'image_name' in df.columns:
+            img_name = row['image_name']
+        else:
+            img_name = row['img_name']
         img_id = df_imgs.index(img_name)  # starts from 0
         if img_name not in img2idx:
             img2idx[img_name] = img_id

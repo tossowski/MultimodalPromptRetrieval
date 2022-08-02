@@ -13,7 +13,7 @@ from datetime import datetime
 import torch.nn as nn
 from torch.optim import lr_scheduler
 from torch.utils.tensorboard import SummaryWriter
-
+import dgl
 
 def compute_score_with_logits(logits, labels):
     if labels.shape[0] == 0:     # sometimes, all samples in the batch are either open or close
@@ -99,7 +99,14 @@ def train(cfg, model, question_model, train_loader, eval_loader, n_unique_close,
             if cfg.TRAIN.VISION.OTHER_MODEL:
                 v = v.to(device)
 
-            q[0] = q[0].to(device)
+            if cfg.METHOD == "GCN":
+                graph_ids = q[2]
+                graphs = [train_loader.dataset.graphs[idx] for idx in graph_ids]
+                q[2] = dgl.batch(graphs)
+                #print(dir(train_loader))
+
+            for i in range(len(q)):
+                q[i] = q[i].to(device)
             a = a.to(device)
             if cfg.TRAIN.VISION.AUTOENCODER:
                 last_output_close, last_output_open, a_close, a_open, decoder = model(v, q,a, answer_target)
@@ -195,17 +202,25 @@ def evaluate_classifier(model,pretrained_model, dataloader, cfg, n_unique_close,
             if cfg.TRAIN.VISION.OTHER_MODEL:
                 v = v.to(device)
             
-            q[0] = q[0].to(device)
+
+            if cfg.METHOD == "GCN":
+                graph_ids = q[2]
+                graphs = [dataloader.dataset.graphs[idx] for idx in graph_ids]
+                q[2] = dgl.batch(graphs)
+
+
+            for i in range(len(q)):
+                q[i] = q[i].to(device)
             if cfg.TRAIN.QUESTION.CLIP:
                 q[1] = q[1].to(device)
             a = a.to(device)
-
             if cfg.TRAIN.VISION.AUTOENCODER:
                 last_output_close, last_output_open, a_close, a_open, decoder, _, _ = model.forward_classify(v, q, a, pretrained_model, n_unique_close)
             else:
                 last_output_close, last_output_open, a_close, a_open, _, _ = model.forward_classify(v, q, a, pretrained_model, n_unique_close)
 
             preds_close, preds_open = model.classify(last_output_close, last_output_open)
+
             
             batch_close_score = 0.
             batch_open_score = 0.

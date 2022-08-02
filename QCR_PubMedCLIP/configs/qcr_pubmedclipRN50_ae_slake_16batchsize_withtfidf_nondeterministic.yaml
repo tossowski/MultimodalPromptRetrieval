@@ -42,7 +42,7 @@ TRAIN:
     AE_ALPHA: 0.001
     MAML: False
     CLIP: True
-    CLIP_PATH: "path/to/fine-tuned/PubMedCLIP"
+    CLIP_PATH: "./data/models/PubMedCLIP_RN50.pth"
     CLIP_VISION_ENCODER: "RN50"
     OTHER_MODEL: False
 

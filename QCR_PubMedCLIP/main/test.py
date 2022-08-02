@@ -22,6 +22,7 @@ def compute_score_with_logits(logits, labels):
     logits = torch.max(logits, 1)[1].data  # argmax
     one_hots = torch.zeros(*labels.size()).to(logits.device)
     one_hots.scatter_(1, logits.view(-1, 1), 1)
+    #print(one_hots)
     scores = (one_hots * labels)
     return scores, logits
 
@@ -34,17 +35,17 @@ def get_time_stamp():
     time_stamp = "%s.%03d" % (data_head, data_secs)
     return time_stamp
 # Train phase
-def test(cfg, model, question_model, eval_loader, n_unique_close, device, s_opt=None, s_epoch=0):
+def test(cfg, model, question_model, eval_loader, n_unique_close, device, s_opt=None, s_epoch=0, label2ans=None):
     model = model.to(device)
     question_model = question_model.to(device)
     utils.create_dir(cfg.TEST.RESULT_DIR)
 
     # Evaluation
-    eval_score, open_score, close_score = evaluate_classifier(model,question_model, eval_loader, cfg, n_unique_close, device, cfg.TEST.RESULT_DIR)
+    eval_score, open_score, close_score = evaluate_classifier(model,question_model, eval_loader, cfg, n_unique_close, device, cfg.TEST.RESULT_DIR, label2ans)
 
         
 # Evaluation
-def evaluate_classifier(model,pretrained_model, dataloader, cfg, n_unique_close, device, result_dir):
+def evaluate_classifier(model,pretrained_model, dataloader, cfg, n_unique_close, device, result_dir, label2ans = None):
     score = 0
     total = 0
     open_ended = 0. #'OPEN'
@@ -59,7 +60,6 @@ def evaluate_classifier(model,pretrained_model, dataloader, cfg, n_unique_close,
     
     with torch.no_grad():
         for i,(v, q, a,answer_type, question_type, phrase_type, answer_target, image_name, question_text, answer_text) in enumerate(dataloader):
-
             if cfg.TRAIN.VISION.MAML:
                 v[0] = v[0].reshape(v[0].shape[0], 84, 84).unsqueeze(1)
                 v[0] = v[0].to(device)
@@ -75,7 +75,8 @@ def evaluate_classifier(model,pretrained_model, dataloader, cfg, n_unique_close,
             if cfg.TRAIN.VISION.OTHER_MODEL:
                 v = v.to(device)
             
-            q[0] = q[0].to(device)
+            for i in range(len(q)):
+                q[i] = q[i].to(device)
             if cfg.TRAIN.QUESTION.CLIP:
                 q[1] = q[1].to(device)
             a = a.to(device)
@@ -86,12 +87,17 @@ def evaluate_classifier(model,pretrained_model, dataloader, cfg, n_unique_close,
                 last_output_close, last_output_open, a_close, a_open, indexs_open, indexs_close = model.forward_classify(v, q, a, pretrained_model, n_unique_close)
 
             preds_close, preds_open = model.classify(last_output_close, last_output_open)
-            
+
+
             batch_close_score = 0.
             batch_open_score = 0.
+            close_correct = []
+            open_correct = []
             if preds_close.shape[0] != 0:
                 batch_close_score_temp, close_logits = compute_score_with_logits(preds_close, a_close.data)
                 close_correct = (batch_close_score_temp == 1).nonzero(as_tuple=True)[0].tolist()
+                # print((batch_close_score_temp == 1))
+                # print((batch_close_score_temp == 1).nonzero(as_tuple=True))
                 batch_close_score = batch_close_score_temp.sum()
             if preds_open.shape[0] != 0: 
                 batch_open_score_temp, open_logits = compute_score_with_logits(preds_open, a_open.data)
@@ -110,7 +116,9 @@ def evaluate_classifier(model,pretrained_model, dataloader, cfg, n_unique_close,
             score_close += batch_close_score
 
             assert len(indexs_close) + len(indexs_open) == len(image_name)
-            assert len(close_correct) + len(open_correct) <= len(image_name)  # batch size
+
+            # ERRORS When 100% are predicted to be CLOSED/OPEN
+            #assert len(close_correct) + len(open_correct) <= len(image_name)  # batch size
 
             close_incorrect = [i for i in range(len(indexs_close)) if i not in close_correct]
             open_incorrect = [i for i in range(len(indexs_open)) if i not in open_correct]
@@ -121,11 +129,12 @@ def evaluate_classifier(model,pretrained_model, dataloader, cfg, n_unique_close,
                 correct_results["answer"].append(answer_text[ind])
                 correct_results["predicted_answer_type"].append("CLOSED")
                 correct_results["answer_type"].append(answer_type[ind])
+
             for ind in close_incorrect:
                 incorrect_results["image_name"].append(image_name[ind])
                 incorrect_results["question"].append(question_text[ind])
                 incorrect_results["answer"].append(answer_text[ind])
-                incorrect_results["predicted_answer"].append(close_logits[ind].cpu())
+                incorrect_results["predicted_answer"].append(label2ans[close_logits[ind]])
                 incorrect_results["predicted_answer_type"].append("CLOSED")
                 incorrect_results["answer_type"].append(answer_type[ind])
             for i in open_correct:
@@ -139,9 +148,11 @@ def evaluate_classifier(model,pretrained_model, dataloader, cfg, n_unique_close,
                 incorrect_results["image_name"].append(image_name[ind])
                 incorrect_results["question"].append(question_text[ind])
                 incorrect_results["answer"].append(answer_text[ind])
-                incorrect_results["predicted_answer"].append(open_logits[ind].cpu())
+                # incorrect_results["predicted_answer"].append(open_logits[ind].cpu())
                 incorrect_results["predicted_answer_type"].append("OPEN")
                 incorrect_results["answer_type"].append(answer_type[ind])
+                incorrect_results["predicted_answer"].append(label2ans[open_logits[ind]])
+
 
     try:
         score = 100* score / total

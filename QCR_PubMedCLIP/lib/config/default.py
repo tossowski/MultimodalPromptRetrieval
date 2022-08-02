@@ -11,6 +11,7 @@ _C = CN()
 # ----- BASIC SETTINGS -----
 _C.NAME = "default"
 _C.OUTPUT_DIR = "/home/VQAMed/output"
+_C.METHOD = "normal"
 _C.PIN_MEMORY = True
 _C.COLOR_SPACE = "RGB"
 _C.RESUME_MODEL = ""

@@ -43,7 +43,7 @@ TRAIN:
     MAML: False
     MAML_PATH: "pretrained_maml.weights"
     CLIP: True
-    CLIP_PATH: "path/to/fine-tuned/PubMedCLIP"
+    CLIP_PATH: "./data/models/PubMedCLIP_RN50x4.pth"
     CLIP_VISION_ENCODER: "RN50x4"
     OTHER_MODEL: False
 
