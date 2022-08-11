@@ -4,6 +4,7 @@ from PIL import Image
 import torch
 import os
 import pickle
+import clip
 from torch.utils.data import Dataset,DataLoader
 
 def _load_dataset(dataroot, name):
@@ -23,7 +24,8 @@ def _load_dataset(dataroot, name):
         sample = {'image_name' : entry['img_name'],
             'question': entry['question'],
             'answer' : entry['answer'],
-            'task': entry['content_type']}
+            'task': entry['content_type'],
+            'question_type': entry['answer_type'].lower()}
         entries.append(sample)
 
     
@@ -35,6 +37,8 @@ class VQASLAKEFeatureDataset(Dataset):
         super(VQASLAKEFeatureDataset, self).__init__()
         self.name = name
         self.entries = _load_dataset(dataroot, name)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        _, self.preprocess = clip.load("ViT-B/32", device=device)
         
         images_path = os.path.join(dataroot, f'images_{name}.pkl')
         if os.path.exists(images_path):
@@ -50,9 +54,8 @@ class VQASLAKEFeatureDataset(Dataset):
                     continue
                 image_path = os.path.join(dataroot, "imgs", entry['image_name'])
                 image = Image.open(image_path)
-                image = image.resize((224, 224), Image.ANTIALIAS)
-                np_image = np.array(image)
-                image_dict[entry['image_name']] = np_image
+                image = self.preprocess(image)
+                image_dict[entry['image_name']] = image
             with open(images_path, 'wb') as f:
                 pickle.dump(image_dict, f)
             with open(images_path, 'rb') as f:
@@ -70,4 +73,5 @@ class VQASLAKEFeatureDataset(Dataset):
         item['question'] = entry['question']
         item['answer'] = entry['answer']
         item['task'] = entry['task']
+        item['question_type'] = entry['question_type']
         return item

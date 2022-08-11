@@ -1,93 +1,107 @@
 from transformers import T5Tokenizer, T5ForConditionalGeneration
+from T5VisionModel import T5VisionModel
 from SLAKE import VQASLAKEFeatureDataset
+from VQA_RAD import VQARADFeatureDataset
 from torch.utils.data import DataLoader
-import torch
+from tqdm import tqdm
 from collections import defaultdict
+import torch
 import argparse
+import warnings
+import json
+import clip
+
+warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=UserWarning)
+
+CFG = json.load(open("config/config.json"))
+
+data_name = CFG["dataset"]
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--train", help="train a model", action="store_true")
 parser.add_argument("--test", help="test a model", action="store_true")
 args = parser.parse_args()
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = T5VisionModel().to(device)
 
-tokenizer = T5Tokenizer.from_pretrained("t5-small")
-model = T5ForConditionalGeneration.from_pretrained("t5-small")
+max_source_length = CFG["max_source_length"]
+max_target_length = CFG["max_target_length"]
 
-max_source_length = 512
-max_target_length = 128
+if data_name == "VQA_RAD":
+    dataset_train = VQARADFeatureDataset("train", f"data/{data_name}")
+    dataset_test = VQARADFeatureDataset("test", f"data/{data_name}")
+else:
+    dataset_train = VQASLAKEFeatureDataset("train", f"data/{data_name}")
+    dataset_test = VQASLAKEFeatureDataset("test", f"data/{data_name}")
 
-dataset_train = VQASLAKEFeatureDataset("train", "data/SLAKE")
-dataset_test = VQASLAKEFeatureDataset("test", "data/SLAKE")
-train_loader = DataLoader(dataset_train, 16, shuffle=True, num_workers=2)
-test_loader = DataLoader(dataset_test, 16, shuffle=True, num_workers=2)
+
+train_loader = DataLoader(dataset_train, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
+test_loader = DataLoader(dataset_test, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
 
 
-learning_rate = 1e-4
+learning_rate = CFG["hyperparameters"]["learning_rate"]
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 if args.train:
-    for batch_num, batch in enumerate(train_loader):
-        print(batch_num)
-        task_prefixes = [f"Answer the {x} question: " for x in batch['task']]
-        encoding = tokenizer(
-        [task_prefixes[i] + batch['question'][i] for i in range(len(batch['question']))],
-        padding="longest",
-        max_length=max_source_length,
-        truncation=True,
-        return_tensors="pt",
-        )
-
-        input_ids, attention_mask = encoding.input_ids, encoding.attention_mask
-
-        target_encoding = tokenizer(
-        batch['answer'], padding="longest", max_length=max_target_length, truncation=True
-        )
-
-        labels = target_encoding.input_ids
-        labels = torch.tensor(labels)
-        labels[labels == tokenizer.pad_token_id] = -100
-
-        loss = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels).loss
+    model.train()
+    for batch in tqdm(train_loader):
+        loss = model(batch)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
     torch.save({'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict()}, "models/model.pt")
+                'optimizer_state_dict': optimizer.state_dict()}, f"models/model_{data_name}.pt")
 
 # Test
 if args.test:
-    checkpoint = torch.load("models/model.pt")
+
+
+    checkpoint = torch.load(f"models/model_{data_name}.pt")
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
     correct = defaultdict(int)
     performance = defaultdict(int)
     total = defaultdict(int)
-    for batch in test_loader:
-        task_prefixes = [f"Answer the {x} question: " for x in batch['task']]
-        encoding = tokenizer(
-        [task_prefixes[i] + batch['question'][i] for i in range(len(batch['question']))],
-        padding="longest",
-        max_length=max_source_length,
-        truncation=True,
-        return_tensors="pt",
-        )
+    open_correct = 0
+    closed_correct = 0
+    open_total = 0
+    closed_total = 0
 
-        output_sequences = model.generate(
-        input_ids=encoding["input_ids"],
-        attention_mask=encoding["attention_mask"],
-        do_sample=False,  # disable sampling to test if batching affects output
-        )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    clip_model, preprocess = clip.load("ViT-B/32", device=device)
 
-        predicted_answers = tokenizer.batch_decode(output_sequences, skip_special_tokens=True)
-        
+    for batch in tqdm(test_loader):
+
+        predicted_answers = model.predict_sequence(batch)
+
         for i in range(len(predicted_answers)):
-            if predicted_answers[i] == batch["answer"][i]:
+            if predicted_answers[i].lower() == batch["answer"][i].lower():
                 correct[batch["task"][i]] += 1
+                if batch["question_type"][i] == "open":
+                    open_correct += 1
+                else:
+                    closed_correct += 1
+        
             total[batch["task"][i]] += 1
+            if batch["question_type"][i] == "open":
+                open_total += 1
+            else:
+                closed_total += 1
+
     for key in correct:
         performance[key] = correct[key] / total[key]
-    print(performance)
-    print(sum(correct.values())/sum(total.values()))
+
+
+    print("=======QUESTION TYPE PERFORMANCE=======")
+    for key, val in performance.items():
+        print(f"{key}: {round(val, 2)}")
+    print("=======OPEN VS CLOSED PERFORMANCE======")
+    print(f"Open: {round(open_correct/open_total, 2)}")
+    print(f"Closed: {round(closed_correct/closed_total, 2)}")
+    print("===========OVERALL PERFORMANCE=========")
+    print(f"Overall accuracy: {round(sum(correct.values())/sum(total.values()), 2)}")
         #print([batch['answer'][i] + "|||" + predicted_answers[i] for i in range(len(predicted_answers))])
 
