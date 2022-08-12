@@ -58,7 +58,6 @@ class VQARADFeatureDataset(Dataset):
     def __init__(self, name, dataroot):
         super(VQARADFeatureDataset, self).__init__()
         self.name = name
-        assert self.name in ["train", "test"] # No validation set for VQA_RAD
         self.entries = _load_dataset(dataroot, name)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         _, self.preprocess = clip.load("ViT-B/32", device=device)

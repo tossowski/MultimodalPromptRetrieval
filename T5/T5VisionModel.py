@@ -6,13 +6,14 @@ import torch.nn.functional as F
 from torch import nn
 
 class T5VisionModel(nn.Module):
-    def __init__(self, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128):
+    def __init__(self, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True):
         super().__init__()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.vision_encoder = vision_encoder
         self.T5_version = T5_version
         self.max_source_length = max_source_length
         self.max_target_length = max_target_length
+        self.use_image_info = use_image_info
         self.vision_model, _ = clip.load(self.vision_encoder, device=self.device)
         
         self.tokenizer = T5Tokenizer.from_pretrained(self.T5_version)
@@ -58,10 +59,15 @@ class T5VisionModel(nn.Module):
 
     def predict_sequence(self, batch):
         task_prefixes = [f"Answer the {x} question: " for x in batch['task']]
-        image_prompts = [f"Based on the picture: " for x in batch['task']]
+        image_prompts = ["Based on the picture: " for x in batch['task']]
+        
+        if self.use_image_info:
+            input_sentences = [task_prefixes[i] + batch['question'][i] + image_prompts[i] for i in range(len(batch['question']))]
+        else:
+            input_sentences = [task_prefixes[i] + batch['question'][i] for i in range(len(batch['question']))]
         
         encoding = self.tokenizer(
-        [task_prefixes[i] + batch['question'][i] + image_prompts[i] for i in range(len(batch['question']))],
+        input_sentences,
         padding="longest",
         max_length=self.max_source_length,
         truncation=True,
@@ -72,10 +78,12 @@ class T5VisionModel(nn.Module):
         question_embedding = self.T5_model.shared(encoding["input_ids"].to(self.device))
 
 
-        combined_embedding = torch.cat((question_embedding, image_embeddings), axis=1).to(self.device)
-        #attention_mask = torch.cat((encoding.attention_mask), axis=1).to(self.device)
-        attention_mask = self.pad_attention_mask(encoding.attention_mask, image_embeddings.shape[1])
-
+        if self.use_image_info:
+            combined_embedding = torch.cat((question_embedding, image_embeddings), axis=1).to(self.device)
+            attention_mask = self.pad_attention_mask(encoding.attention_mask, image_embeddings.shape[1])
+        else:
+            combined_embedding = question_embedding.to(self.device)
+            attention_mask = encoding.attention_mask.to(self.device)
         #print(model.get_input_embeddings())
         output_sequences = self.T5_model.generate(
         inputs_embeds = combined_embedding,
@@ -90,12 +98,17 @@ class T5VisionModel(nn.Module):
 
     def forward(self, batch):
         task_prefixes = [f"Answer the {x} question: " for x in batch['task']]
-        image_prompts = [f"Based on the picture: " for x in batch['task']]
+        image_prompts = ["Based on the picture: " for x in batch['task']]
         
         image_embeddings = self.vision_model.encode_image(batch["image"].to(self.device))
-
+        
+        if self.use_image_info:
+            input_sentences = [task_prefixes[i] + batch['question'][i] + image_prompts[i] for i in range(len(batch['question']))]
+        else:
+            input_sentences = [task_prefixes[i] + batch['question'][i] for i in range(len(batch['question']))]
+        
         encoding = self.tokenizer(
-        [task_prefixes[i] + batch['question'][i] + image_prompts[i] for i in range(len(batch['question']))],
+        input_sentences,
         padding="longest",
         max_length=self.max_source_length,
         truncation=True,
@@ -115,10 +128,12 @@ class T5VisionModel(nn.Module):
 
 
         # Adding vision embeddings to question
-        #sprint(question_embedding.shape, image_embeddings.shape)
-        #image_embeddings = torch.zeros_like(image_embeddings)
-        combined_embedding = torch.cat((question_embedding, image_embeddings), axis=1)
-        attention_mask = self.pad_attention_mask(encoding.attention_mask, image_embeddings.shape[1])
+        if self.use_image_info:
+            combined_embedding = torch.cat((question_embedding, image_embeddings), axis=1).to(self.device)
+            attention_mask = self.pad_attention_mask(encoding.attention_mask, image_embeddings.shape[1])
+        else:
+            combined_embedding = question_embedding
+            attention_mask = encoding.attention_mask
         
         combined_embedding = combined_embedding.to(self.device)
         attention_mask = attention_mask.to(self.device)
