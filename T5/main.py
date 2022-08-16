@@ -4,7 +4,7 @@ from VQA_RAD import VQARADFeatureDataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from collections import defaultdict
-from utils import get_validation_loss
+from utils import get_validation_loss, visualize_attn_weights
 
 import torch
 import argparse
@@ -17,6 +17,13 @@ warnings.simplefilter(action='ignore', category=UserWarning)
 CFG = json.load(open("config/config.json"))
 
 data_name = CFG["dataset"]
+use_image_info = bool(CFG["use_image_info"])
+
+if use_image_info:
+    MODEL_SAVE_PATH = f"models/model_{data_name}_with_vision.pt"
+else:
+    MODEL_SAVE_PATH = f"models/model_{data_name}_no_vision.pt"
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--train", help="train a model", action="store_true")
@@ -24,7 +31,7 @@ parser.add_argument("--test", help="test a model", action="store_true")
 args = parser.parse_args()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = T5VisionModel(use_image_info=False).to(device)
+model = T5VisionModel(use_image_info=use_image_info).to(device)
 
 max_source_length = CFG["max_source_length"]
 max_target_length = CFG["max_target_length"]
@@ -47,7 +54,6 @@ else:
 
 train_loader = DataLoader(dataset_train, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
 validate_loader = DataLoader(dataset_validate, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
-
 test_loader = DataLoader(dataset_test, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
 
 
@@ -69,11 +75,12 @@ if args.train:
 
         valid_loss = get_validation_loss(model, validate_loader)
         scheduler.step(valid_loss)
+
         print(f"Validation Loss: {valid_loss} | Best Validation Loss: {best_valid_loss} at epoch {best_epoch}")
         if valid_loss < best_valid_loss:
-            print("Saving model ...")
+            print(f"Saving model to {MODEL_SAVE_PATH} ...")
             torch.save({'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict()}, f"models/model_{data_name}.pt")
+                    'optimizer_state_dict': optimizer.state_dict()}, MODEL_SAVE_PATH)
             best_valid_loss = valid_loss
             best_epoch = epoch
 
@@ -81,7 +88,7 @@ if args.train:
 if args.test:
 
 
-    checkpoint = torch.load(f"models/model_{data_name}.pt")
+    checkpoint = torch.load(MODEL_SAVE_PATH)
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
@@ -96,6 +103,8 @@ if args.test:
     for batch in tqdm(test_loader):
 
         predicted_answers = model.predict_sequence(batch)
+        #visualize_attn_weights(model, batch)
+        #break
 
         for i in range(len(predicted_answers)):
             if predicted_answers[i].lower() == batch["answer"][i].lower():

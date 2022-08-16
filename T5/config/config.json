@@ -1,12 +1,13 @@
 {
     "max_source_length" : 512,
     "max_target_length" : 128,
-    "dataset": "VQA_RAD",
+    "dataset": "SLAKE",
+    "use_image_info": 1,
 
     "hyperparameters": {
-        "epochs": 10,
+        "epochs": 100,
         "learning_rate": 0.0001,
-        "batch_size": 16
+        "batch_size": 1
     }
 
 
