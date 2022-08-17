@@ -31,23 +31,23 @@ def _load_dataset(dataroot, name):
     dataroot: root path of dataset
     name: 'train', 'val', 'test'
     """
-    data_path = os.path.join(dataroot, 'VQA_RAD.xlsx')
-    samples_all = pd.read_excel(data_path)
+    data_path = os.path.join(dataroot, f'{name}set.json')
+    samples_all = pd.read_json(data_path)
 
-    if name == "test":
-        samples_all = samples_all[samples_all["QID_para"].str.contains(name)]
-    else:
-        samples_all = samples_all[~samples_all["QID_para"].str.contains(name)]
+    # if name == "test":
+    #     samples_all = samples_all[samples_all["QID_para"].str.contains(name)]
+    # else:
+    #     samples_all = samples_all[~samples_all["QID_para"].str.contains(name)]
 
     entries = []
     for idx, entry in samples_all.iterrows():
-        for qtype in entry["Q_TYPE"].split(", "):
+        for qtype in entry["question_type"].split(", "):
 
-            sample = {'image_name' : entry['IMAGEID'].split("/")[-1],
-                'question': entry['QUESTION'],
-                'answer' : str(entry['ANSWER']),
+            sample = {'image_name' : entry['image_name'],
+                'question': entry['question'],
+                'answer' : str(entry['answer']),
                 'task': qtype_map[qtype],
-                'question_type': entry['A_TYPE'].lower()}
+                'question_type': entry['answer_type'].lower()}
             entries.append(sample)
 
     

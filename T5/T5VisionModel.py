@@ -17,7 +17,9 @@ class T5VisionModel(nn.Module):
         self.vision_model, _ = clip.load(self.vision_encoder, device=self.device)
         
         self.tokenizer = T5Tokenizer.from_pretrained(self.T5_version)
+        self.tokenizer.add_tokens(["[itk]"])
         self.T5_model = T5ForConditionalGeneration.from_pretrained(self.T5_version)
+        self.T5_model.resize_token_embeddings(len(self.tokenizer))
 
         self.vision_model.visual = self.vision_model.visual.float()
         self.vision_model.visual.forward = self.get_image_token_features
@@ -50,10 +52,13 @@ class T5VisionModel(nn.Module):
 
     def prepare_input(self, batch):
         task_prefixes = [f"Answer the {x} question: " for x in batch['task']]
-        image_prompts = ["Based on the picture: " for x in batch['task']]
-        
+        image_prompts = [" Based on the picture: " for x in batch['task']]
+        image_embeddings = self.vision_model.visual(batch["image"].to(self.device))
+        image_tokens = "[itk] " * image_embeddings.shape[1]
+        image_tokens = image_tokens[:-1]
+    
         if self.use_image_info:
-            input_sentences = [task_prefixes[i] + batch['question'][i] + image_prompts[i] for i in range(len(batch['question']))]
+            input_sentences = [task_prefixes[i] + batch['question'][i] + image_prompts[i] + image_tokens for i in range(len(batch['question']))]
         else:
             input_sentences = [task_prefixes[i] + batch['question'][i] for i in range(len(batch['question']))]
         
@@ -65,27 +70,24 @@ class T5VisionModel(nn.Module):
         return_tensors="pt",
         )
 
-        image_embeddings = self.vision_model.visual(batch["image"].to(self.device))
         question_embedding = self.T5_model.shared(encoding["input_ids"].to(self.device))
-
-
+        attention_mask = encoding.attention_mask.to(self.device)
         if self.use_image_info:
-            combined_embedding = torch.cat((question_embedding, image_embeddings), axis=1).to(self.device)
-            attention_mask = self.pad_attention_mask(encoding.attention_mask, image_embeddings.shape[1]).to(self.device)
+            combined_embedding = self.insert_image_features(image_embeddings, question_embedding, encoding.attention_mask)
         else:
             combined_embedding = question_embedding.to(self.device)
-            attention_mask = encoding.attention_mask.to(self.device)
         
         return combined_embedding, attention_mask, encoding
 
     # Pad attention masks with additional 1s so image features aren't ignored
-    def pad_attention_mask(self, masks, pad_amount):
+    def insert_image_features(self, image_features, question_embedding, attention_masks):
         # Maybe parallelize later
-        new_mask = []
-        for i in range(masks.shape[0]):
-            idx = sum(masks[i])
-            new_mask.append(torch.cat([masks[i][:idx], torch.ones(pad_amount), masks[i][idx:]], 0))
-        return torch.stack(new_mask, axis=0).to(self.device)
+        n_image_tokens = image_features.shape[1]
+        len_sentence = question_embedding.shape[1]
+        for i in range(image_features.shape[0]):
+            n_padding = len_sentence - sum(attention_masks[i])
+            question_embedding[i, len_sentence - n_padding - n_image_tokens - 1:len_sentence - n_padding - 1, :] = image_features[i]
+        return question_embedding
 
     def predict_sequence(self, batch):
 
