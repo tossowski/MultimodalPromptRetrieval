@@ -36,6 +36,7 @@ class VQASLAKEFeatureDataset(Dataset):
     def __init__(self, name, dataroot):
         super(VQASLAKEFeatureDataset, self).__init__()
         self.name = name
+        self.dataroot = dataroot
         self.entries = _load_dataset(dataroot, name)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         _, self.preprocess = clip.load("ViT-B/32", device=device)
@@ -62,6 +63,9 @@ class VQASLAKEFeatureDataset(Dataset):
                 self.images = pickle.load(f)
             print(f"Loaded {len(self.images)} existing images")
 
+    def filter(self, qtype_list):
+        self.entries = [x for x in self.entries if x["task"] in qtype_list]
+
     def __len__(self):
         return len(self.entries)
     
@@ -69,6 +73,7 @@ class VQASLAKEFeatureDataset(Dataset):
     def __getitem__(self, index):
         entry = self.entries[index]
         item = {}
+        item["path_to_image"] = os.path.join(self.dataroot, "imgs", entry['image_name'])
         item['image'] = self.images[entry['image_name']]
         item['question'] = entry['question']
         item['answer'] = entry['answer']

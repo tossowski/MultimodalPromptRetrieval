@@ -31,7 +31,7 @@ def _load_dataset(dataroot, name):
     dataroot: root path of dataset
     name: 'train', 'val', 'test'
     """
-    data_path = os.path.join(dataroot, f'{name}set.json')
+    data_path = os.path.join(dataroot, f'{name}.json')
     samples_all = pd.read_json(data_path)
 
     # if name == "test":
@@ -58,6 +58,7 @@ class VQARADFeatureDataset(Dataset):
     def __init__(self, name, dataroot):
         super(VQARADFeatureDataset, self).__init__()
         self.name = name
+        self.dataroot = dataroot
         self.entries = _load_dataset(dataroot, name)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         _, self.preprocess = clip.load("ViT-B/32", device=device)
@@ -86,11 +87,15 @@ class VQARADFeatureDataset(Dataset):
 
     def __len__(self):
         return len(self.entries)
+
+    def filter(self, qtype_list):
+        self.entries = [x for x in self.entries if x["task"] in qtype_list]
     
 
     def __getitem__(self, index):
         entry = self.entries[index]
         item = {}
+        item["path_to_image"] = os.path.join(self.dataroot, "imgs", entry['image_name'])
         item['image'] = self.images[entry['image_name']]
         item['question'] = entry['question']
         item['answer'] = entry['answer']

@@ -10,6 +10,7 @@ import torch
 import argparse
 import warnings
 import json
+import os
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
@@ -19,11 +20,18 @@ CFG = json.load(open("config/config.json"))
 data_name = CFG["dataset"]
 use_image_info = bool(CFG["use_image_info"])
 
+MODEL_SAVE_FOLDER = "./models"
+MODEL_PREFIX = f"model_{data_name}"
 if use_image_info:
-    MODEL_SAVE_PATH = f"models/model_{data_name}_with_vision.pt"
+    MODEL_PREFIX += "_with_vision"
 else:
-    MODEL_SAVE_PATH = f"models/model_{data_name}_no_vision.pt"
+    MODEL_PREFIX += "_no_vision"
 
+if CFG["fewshot_training_tasks"]["enabled"]:
+    MODEL_PREFIX += "_fewshot"
+
+MODEL_SAVE_PATH = os.path.join(MODEL_SAVE_FOLDER, MODEL_PREFIX + ".pt")
+print(f"Model will be saved/loaded from {MODEL_SAVE_PATH}")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--train", help="train a model", action="store_true")
@@ -31,13 +39,13 @@ parser.add_argument("--test", help="test a model", action="store_true")
 args = parser.parse_args()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = T5VisionModel(use_image_info=use_image_info).to(device)
+model = T5VisionModel(vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"]).to(device)
 
 max_source_length = CFG["max_source_length"]
 max_target_length = CFG["max_target_length"]
 
 if data_name == "VQA_RAD":
-    dataset_train = VQARADFeatureDataset("train", f"data/{data_name}") 
+    dataset_train = VQARADFeatureDataset("train", os.path.join(CFG["datafolder"],data_name)) 
     # VQA_RAD doesn't have validation data, so use subset of train to estimate
     
     train_split = list(range(len(dataset_train) // 8, len(dataset_train)))
@@ -45,12 +53,19 @@ if data_name == "VQA_RAD":
 
     dataset_train = torch.utils.data.Subset(dataset_train, train_split)
     dataset_validate = torch.utils.data.Subset(dataset_train, validate_split)
-    dataset_test = VQARADFeatureDataset("test", f"data/{data_name}")
+    dataset_test = VQARADFeatureDataset("test", os.path.join(CFG["datafolder"],data_name))
 else:
-    dataset_train = VQASLAKEFeatureDataset("train", f"data/{data_name}")
-    dataset_validate = VQASLAKEFeatureDataset("validate", f"data/{data_name}")
-    dataset_test = VQASLAKEFeatureDataset("test", f"data/{data_name}")
+    dataset_train = VQASLAKEFeatureDataset("train", os.path.join(CFG["datafolder"],data_name))
+    dataset_validate = VQASLAKEFeatureDataset("validate", os.path.join(CFG["datafolder"],data_name))
+    dataset_test = VQASLAKEFeatureDataset("test", os.path.join(CFG["datafolder"],data_name))
 
+if CFG["fewshot_training_tasks"]["enabled"]:
+    print(f'Filtering training to only consist of these tasks: {CFG["fewshot_training_tasks"]["training"]}')
+    dataset_train.filter(CFG["fewshot_training_tasks"]["training"])
+    dataset_validate.filter(CFG["fewshot_training_tasks"]["training"])
+    print(f'Filtering test to only consist of these tasks: {CFG["fewshot_training_tasks"]["test"]}')
+    dataset_test.filter(CFG["fewshot_training_tasks"]["test"])
+    print(f"Train data has {len(dataset_train)} examples\nValidation data has {len(dataset_validate)} examples\nTest data has {len(dataset_test)} examples")
 
 train_loader = DataLoader(dataset_train, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
 validate_loader = DataLoader(dataset_validate, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
@@ -79,6 +94,7 @@ if args.train:
         print(f"Validation Loss: {valid_loss} | Best Validation Loss: {best_valid_loss} at epoch {best_epoch}")
         if valid_loss < best_valid_loss:
             print(f"Saving model to {MODEL_SAVE_PATH} ...")
+            os.makedirs(MODEL_SAVE_FOLDER, exist_ok = True)
             torch.save({'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict()}, MODEL_SAVE_PATH)
             best_valid_loss = valid_loss
@@ -86,7 +102,6 @@ if args.train:
 
 # Test
 if args.test:
-
 
     checkpoint = torch.load(MODEL_SAVE_PATH)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -101,14 +116,13 @@ if args.test:
     closed_total = 0
 
     for batch in tqdm(test_loader):
-
         predicted_answers = model.predict_sequence(batch)
         #visualize_attn_weights(model, batch)
         #break
 
         for i in range(len(predicted_answers)):
             if predicted_answers[i].lower() == batch["answer"][i].lower():
-                print(f'{batch["question"][i]} ||| {predicted_answers[i]} ||| {batch["answer"][i]}')
+                #print(f'{batch["question"][i]} ||| {predicted_answers[i]} ||| {batch["answer"][i]}')
                 
                 correct[batch["task"][i]] += 1
                 if batch["question_type"][i] == "open":

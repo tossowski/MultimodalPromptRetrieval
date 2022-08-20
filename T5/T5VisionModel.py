@@ -1,12 +1,15 @@
 from transformers import T5Tokenizer, T5ForConditionalGeneration
+from tqdm import tqdm
 
 import clip
+import os
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 class T5VisionModel(nn.Module):
-    def __init__(self, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True):
+    def __init__(self, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None):
         super().__init__()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.vision_encoder = vision_encoder
@@ -16,15 +19,45 @@ class T5VisionModel(nn.Module):
         self.use_image_info = use_image_info
         self.vision_model, _ = clip.load(self.vision_encoder, device=self.device)
         
+        if vision_checkpoint:
+            print(f"Loading pretrained vision checkpoint: {vision_checkpoint}")
+            checkpoint = torch.load(vision_checkpoint)
+            self.vision_model.load_state_dict(checkpoint['state_dict'])
+
+        self.vision_model = self.vision_model.float()
+        self.vision_model.visual.forward = self.get_image_token_features
+
         self.tokenizer = T5Tokenizer.from_pretrained(self.T5_version)
         self.tokenizer.add_tokens(["[itk]"])
         self.T5_model = T5ForConditionalGeneration.from_pretrained(self.T5_version)
         self.T5_model.resize_token_embeddings(len(self.tokenizer))
 
-        self.vision_model.visual = self.vision_model.visual.float()
-        self.vision_model.visual.forward = self.get_image_token_features
-        #print(self.T5_model.shared.embedding_dim)
+        self.load_clip_to_t5_mapping()
 
+    def load_clip_to_t5_mapping(self):
+        os.makedirs("mapping", exist_ok=True)
+        PATH_TO_MAPPING = f"mapping/{self.vision_encoder.replace('/','_')}_{self.T5_version}.npy"
+        if os.path.exists(PATH_TO_MAPPING):
+            self.W = torch.FloatTensor(np.load(PATH_TO_MAPPING)).to(self.device)
+        else:
+            vocab = self.tokenizer.get_vocab()
+            A = []
+            B = []
+            print(f"Creating W from {self.vision_encoder} to {self.T5_version} ...")
+            for word, vocab_id in tqdm(vocab.items()):
+                clip_word_encoding = clip.tokenize([word]).to(self.device)
+                clip_word_emb = self.vision_model.encode_text(clip_word_encoding)
+                T5_word_emb = self.T5_model.shared(torch.LongTensor([vocab_id]))
+                A.append(clip_word_emb.detach().cpu().numpy())
+                B.append(T5_word_emb.detach().cpu().numpy())
+            A = np.concatenate(A, axis=0)
+            B = np.concatenate(B, axis=0)
+
+            # Least squares solution
+            W = np.linalg.inv(A.T @ A) @ A.T @ B
+            print(f"Saved W to {PATH_TO_MAPPING}")
+            np.save(PATH_TO_MAPPING, W)
+            self.W = torch.FloatTensor(W).to(self.device)
 
 
     # Returns [batch_sz, grid ** 2 + 1, hidden_dim]
@@ -48,11 +81,14 @@ class T5VisionModel(nn.Module):
         if self.vision_model.visual.proj is not None:
             x = x @ self.vision_model.visual.proj
 
+        x = x @ self.W
+
         return x
 
     def prepare_input(self, batch):
         task_prefixes = [f"Answer the {x} question: " for x in batch['task']]
         image_prompts = [" Based on the picture: " for x in batch['task']]
+
         image_embeddings = self.vision_model.visual(batch["image"].to(self.device))
         image_tokens = "[itk] " * image_embeddings.shape[1]
         image_tokens = image_tokens[:-1]
