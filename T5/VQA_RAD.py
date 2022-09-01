@@ -44,6 +44,7 @@ def _load_dataset(dataroot, name):
         for qtype in entry["question_type"].split(", "):
 
             sample = {'image_name' : entry['image_name'],
+                'question_id': str(entry['qid']),
                 'question': entry['question'],
                 'answer' : str(entry['answer']),
                 'task': qtype_map[qtype],
@@ -88,9 +89,24 @@ class VQARADFeatureDataset(Dataset):
     def __len__(self):
         return len(self.entries)
 
-    def filter(self, qtype_list):
-        self.entries = [x for x in self.entries if x["task"] in qtype_list]
+    def filter(self, qtype_list, limit_num_examples = float("inf")):
+        counts = {}
+        new_entries = []
+        
+        for entry in self.entries:
+            if entry["task"] in qtype_list:
+                if entry["task"] not in counts:
+                    counts[entry["task"]] = 0
+                if counts[entry["task"]] >= limit_num_examples:
+                    continue
+                counts[entry["task"]] += 1
+                new_entries.append(entry)
+        self.entries = new_entries
     
+    def get_question_by_id(self, qid):
+        for i in range(len(self.entries)):
+            if self.entries[i]["question_id"] == qid:
+                return self.__getitem__(i)
 
     def __getitem__(self, index):
         entry = self.entries[index]
@@ -99,6 +115,7 @@ class VQARADFeatureDataset(Dataset):
         item['image'] = self.images[entry['image_name']]
         item['question'] = entry['question']
         item['answer'] = entry['answer']
+        item['question_id'] = entry['question_id']
         item['task'] = entry['task']
         item['question_type'] = entry['question_type']
 

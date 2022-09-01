@@ -1,3 +1,4 @@
+from math import comb
 from transformers import T5Tokenizer, T5ForConditionalGeneration
 from tqdm import tqdm
 
@@ -7,6 +8,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from matplotlib import pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 
 class T5VisionModel(nn.Module):
     def __init__(self, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None):
@@ -38,7 +42,9 @@ class T5VisionModel(nn.Module):
         os.makedirs("mapping", exist_ok=True)
         PATH_TO_MAPPING = f"mapping/{self.vision_encoder.replace('/','_')}_{self.T5_version}.npy"
         if os.path.exists(PATH_TO_MAPPING):
+            print(f"Loading mapping from {PATH_TO_MAPPING}")
             self.W = torch.FloatTensor(np.load(PATH_TO_MAPPING)).to(self.device)
+            self.W /= 20
         else:
             vocab = self.tokenizer.get_vocab()
             A = []
@@ -81,7 +87,7 @@ class T5VisionModel(nn.Module):
         if self.vision_model.visual.proj is not None:
             x = x @ self.vision_model.visual.proj
 
-        x = x @ self.W
+        #x = x @ self.W
 
         return x
 
@@ -90,6 +96,7 @@ class T5VisionModel(nn.Module):
         image_prompts = [" Based on the picture: " for x in batch['task']]
 
         image_embeddings = self.vision_model.visual(batch["image"].to(self.device))
+
         image_tokens = "[itk] " * image_embeddings.shape[1]
         image_tokens = image_tokens[:-1]
     
@@ -107,11 +114,40 @@ class T5VisionModel(nn.Module):
         )
 
         question_embedding = self.T5_model.shared(encoding["input_ids"].to(self.device))
+        
+        
+        
         attention_mask = encoding.attention_mask.to(self.device)
         if self.use_image_info:
             combined_embedding = self.insert_image_features(image_embeddings, question_embedding, encoding.attention_mask)
         else:
             combined_embedding = question_embedding.to(self.device)
+        
+        norm = combined_embedding.pow(2).sum(keepdim=True, dim=2).sqrt()
+        combined_embedding = combined_embedding / norm
+
+        # PCA CODE
+
+        data = combined_embedding.detach().cpu().numpy()[0]
+
+        scaler = StandardScaler()
+        scaler.fit(data)
+        data=scaler.transform(data)    
+        labels = np.zeros(data.shape[0])
+        labels[-51:-1] = 1
+
+        pca = PCA()
+        x_new = pca.fit_transform(data)
+        my_colors = np.where(labels == 1, "red", "blue")
+        fig = plt.figure()
+        plt.scatter(x_new[:,0], x_new[:,1],color=my_colors)
+        plt.savefig(f"pca_{batch['question_id'][0]}.png")
+
+        test = combined_embedding.detach().cpu().numpy()
+        fig, ax = plt.subplots(1, len(test[0]), figsize=(200,10))
+        for i in range(len(test[0])):
+            ax[i].hist(test[0][i])
+        plt.savefig("test.png")
         
         return combined_embedding, attention_mask, encoding
 
