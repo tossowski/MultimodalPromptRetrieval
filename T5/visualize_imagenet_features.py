@@ -15,6 +15,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 from sklearn.manifold import TSNE
 from transformers import T5Tokenizer, T5ForConditionalGeneration
+from create_mapping import CrossModalMapping
 
 try:
     from torchvision.transforms import InterpolationMode
@@ -45,16 +46,20 @@ train_dataset = datasets.ImageFolder(
     _transform(224))
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-device="cpu"
+
 model, preprocess = clip.load("ViT-B/32", device=device)
 model.to(device)
 tokenizer = T5Tokenizer.from_pretrained("t5-small")
 T5_model = T5ForConditionalGeneration.from_pretrained("t5-small").to(device)
+mapping_model = CrossModalMapping(512, 512).to(device)
+checkpoint = torch.load("models/crossmodal_mapping2.pt")
+mapping_model.load_state_dict(checkpoint['model_state_dict'])
 
 train_loader = DataLoader(train_dataset, 1, shuffle=True, num_workers=2)
 image_vecs = []
 text_vecs =  []
 text_vecs_t5 = []
+image_vecs_t5 = []
 i = 0
 for batch in tqdm(train_loader):
     text = f"A photo of a {idx2label[batch[1].item()]}"
@@ -62,10 +67,10 @@ for batch in tqdm(train_loader):
 
     image_features = model.encode_image(batch[0].to(device))
     image_features = image_features / image_features.norm(dim=1, keepdim=True)
-    image_features = image_features.detach().cpu().numpy()
+    
     text_features = model.encode_text(text)
     text_features = text_features / text_features.norm(dim=1, keepdim=True)
-    text_features = text_features.detach().cpu().numpy()
+    
 
     encoding = tokenizer(
         [f"A photo of a {idx2label[batch[1].item()]}"],
@@ -78,9 +83,21 @@ for batch in tqdm(train_loader):
     caption_embedding = torch.mean(caption_embedding, axis=1)
     caption_embedding = caption_embedding / caption_embedding.norm(dim=1, keepdim=True)
 
+    # T5 Mapped image features
+    t5_image_features = mapping_model.linear_relu_stack(text_features)
+    #print(mapping_model.loss2(t5_image_features, caption_embedding))
+    #t5_image_features = t5_image_features / t5_image_features.norm(dim=1, keepdim=True)
+
+
+    image_features = image_features.detach().cpu().numpy()
+    text_features = text_features.detach().cpu().numpy()
+    caption_embedding = caption_embedding.detach().cpu().numpy()
+    t5_image_features = t5_image_features.detach().cpu().numpy()
+
     image_vecs.append(image_features[0])
     text_vecs.append(text_features[0])
-    text_vecs_t5.append(caption_embedding.detach().cpu().numpy()[0])
+    text_vecs_t5.append(caption_embedding[0])
+    image_vecs_t5.append(t5_image_features[0])
     i += 1
     if i == 2000:
         break
@@ -89,7 +106,8 @@ for batch in tqdm(train_loader):
 image_data = np.stack(image_vecs, axis=0)
 text_data = np.stack(text_vecs, axis=0)
 t5_data = np.stack(text_vecs_t5)
-data = np.concatenate((image_data, text_data, t5_data), axis=0)
+t5_images = np.stack(image_vecs_t5)
+data = np.concatenate((image_data, text_data, t5_data, t5_images), axis=0)
 num_images = len(image_data)
 
 scaler = StandardScaler()
@@ -101,11 +119,12 @@ pca = PCA()
 fitted_data = pca.fit_transform(data)
 x_new_image = fitted_data[:len(image_data)]
 x_new_text = fitted_data[len(image_data): 2 * len(image_data)]
-x_new_t5_text = fitted_data[2 * len(image_data):]
+x_new_t5_text = fitted_data[2 * len(image_data):3 * len(image_data)]
+x_new_t5_images = fitted_data[3 * len(image_data):]
 
 # np.random.seed(1)
 # x_new = TSNE(n_components=2).fit_transform(data)
-print(len(x_new_image))
+print(len(x_new_image), len(x_new_text), len(x_new_t5_text), len(x_new_t5_images))
 
 #print(pca.explained_variance_ratio_)
 
@@ -113,9 +132,10 @@ fig = plt.figure()
 scatter_images = plt.scatter(x_new_image[:,0], x_new_image[:,1], label="image_features")
 scatter_text = plt.scatter(x_new_text[:,0], x_new_text[:,1], label="text_features")
 scatter_T5 = plt.scatter(x_new_t5_text[:,0], x_new_t5_text[:,1], label="t5_text_features")
+scatter_T5_image = plt.scatter(x_new_t5_images[:,0], x_new_t5_images[:,1], label="t5_image_features")
 
 
-plt.title("CLIP Image and Text Features on Imagenet Data")
+plt.title("CLIP and T5 Image and Text Features on Imagenet Data")
 names = ['Image Features', 'Caption Features']
 plt.xlabel("PC1")
 plt.ylabel("PC2")

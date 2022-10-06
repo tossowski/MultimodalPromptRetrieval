@@ -1,19 +1,43 @@
+from wsgiref import validate
 from tqdm import tqdm
 from matplotlib import pyplot as plt
+import matplotlib.patches as patches
 import os
 import numpy as np
+import torch
+from copy import deepcopy
 from PIL import Image
+
+def create_ans2label(dataset_train, dataset_validate, dataset_test):
+    samples = deepcopy(dataset_train.entries)
+    samples.extend(dataset_validate.entries)
+    samples.extend(dataset_test.entries)
+    possible_answers = sorted(set([sample['answer'].lower() for sample in samples]))
+    print(len(possible_answers))
+    ans_to_label = {}
+    label_to_ans = {}
+    for i in range(len(possible_answers)):
+        label_to_ans[i] = possible_answers[i]
+        ans_to_label[possible_answers[i]] = i
+
+
+    return label_to_ans, ans_to_label
 
 def get_validation_loss(model, validate_loader):
     print("Calculating Validation Loss ...")
     model.eval()
-    n_batches = 0
     total = 0
+    total_ans = 0
+    total_correct_ans = 0
     for batch in tqdm(validate_loader):
         loss = model(batch)
+        pred = model.predict(batch)
+        # total_correct_ans += torch.sum(torch.eq(batch["labels"].to(model.device), pred))
+        # total_ans += len(batch["labels"])
+        
         total += loss.item()
-        n_batches += 1
-    return total / n_batches
+    #print(f"Valid acc is: {total_correct_ans / total_ans}")
+    return total / len(validate_loader.dataset)
 
 # Weights are tuple of length n_layers
 # Each entry of tuple is of shape (batch_sz, n_heads, seq_len, seq_len)
@@ -50,12 +74,13 @@ def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
     y_ticks = np.linspace(0, weights[0].shape[2] - 1, weights[0].shape[2])
     
     
+
     # 6 layers, each layer has 8 attention heads
     
 
     n_layers = len(weights)
     n_heads = weights[0].shape[1]
-    fig, ax = plt.subplots(1, 2, figsize=(20,20))
+    
 
     assert len(final_tokens_X) == len(x_ticks)
     assert len(final_tokens_Y) == len(y_ticks)
@@ -63,10 +88,17 @@ def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
     original_image = Image.open(batch["path_to_image"][0])
     image_x_ticks = np.linspace(0, original_image.width, grid_size + 1)
     image_y_ticks = np.linspace(0, original_image.height, grid_size + 1)
+    grid_x_length = image_x_ticks[1] - image_x_ticks[0]
+    grid_y_length = image_y_ticks[1] - image_y_ticks[0]
 
     for i in range(n_layers):
         for j in range(n_heads):
-            ax[0].imshow(weights[i][0,j,:,:].detach().cpu().numpy())
+            print(min(10 * len(final_tokens_Y), 2**16-1))
+            fig, ax = plt.subplots(1, len(final_tokens_Y) + 1, figsize=(min(10 * len(final_tokens_Y), 2**16-1),20))
+            #if i == 3 and j == 0:
+
+            ax[0].imshow(weights[i][0,j,:,:].detach().cpu().numpy(), vmin=0, vmax=1)
+
             ax[0].set_title(batch["question"][0])
             ax[0].set_xlabel(f"Correct Answer: {batch['answer'][0]} \n Predicted Answer: {predicted_answers[0]}")
             ax[0].set_xticks(x_ticks)
@@ -75,13 +107,29 @@ def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
             ax[0].set_yticklabels(final_tokens_Y)
             ax[0].tick_params(axis='x', labelrotation = 90)
             #ax[0].grid()
-            ax[1].imshow(original_image)
-            ax[1].set_xticks(image_x_ticks)
-            ax[1].set_yticks(image_y_ticks)
-            ax[1].grid()
-            
-            
+
+            for k in range(len(final_tokens_Y)):
+                ax[k + 1].set_title(final_tokens_Y[k])
+                ax[k + 1].imshow(original_image)
+                ax[k + 1].set_xticks(image_x_ticks)
+                ax[k + 1].set_yticks(image_y_ticks)
+
+                if attn_type == "encoder_attentions":
+                    alphas = weights[i][0,j,-51:-1,k].detach().cpu().numpy()
+                elif attn_type == "cross_attentions":
+                    alphas = weights[i][0,j,k,-51:-1].detach().cpu().numpy()
+                    
+                for l in range(grid_size):
+                    for m in range(grid_size):
+
+                        rect = patches.Rectangle((image_x_ticks[m], image_y_ticks[l]), grid_x_length, grid_y_length, linewidth=1, fill=True, facecolor="red", alpha=alphas[grid_size * l + m])
+                        # Add the patch to the Axes
+                        ax[k + 1].add_patch(rect)
+                ax[k + 1].grid()
+
+
+
             os.makedirs(os.path.join("figures", batch["question_id"][0], f"head{j}"), exist_ok=True)
             plt.savefig(os.path.join("figures", batch["question_id"][0], f"head{j}", f"attention{i}.png"))
-            
+            plt.close()
         

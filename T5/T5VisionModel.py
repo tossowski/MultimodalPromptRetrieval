@@ -11,9 +11,10 @@ from torch import nn
 from matplotlib import pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from create_mapping import CrossModalMapping
 
 class T5VisionModel(nn.Module):
-    def __init__(self, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None):
+    def __init__(self, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None, mapping_checkpoint=None):
         super().__init__()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.vision_encoder = vision_encoder
@@ -21,7 +22,17 @@ class T5VisionModel(nn.Module):
         self.max_source_length = max_source_length
         self.max_target_length = max_target_length
         self.use_image_info = use_image_info
+        self.use_mapping = bool(mapping_checkpoint)
         self.vision_model, _ = clip.load(self.vision_encoder, device=self.device)
+        for p in self.vision_model.parameters():
+            p.requires_grad = False
+
+        if mapping_checkpoint:
+            #print(self.T5_version.shared)
+            print(f"Loading Mapping Model: {mapping_checkpoint}")
+            self.mapping = CrossModalMapping(512, 512).to(self.device)
+            checkpoint = torch.load(mapping_checkpoint)
+            self.mapping.load_state_dict(checkpoint['model_state_dict'])
         
         if vision_checkpoint:
             print(f"Loading pretrained vision checkpoint: {vision_checkpoint}")
@@ -36,34 +47,18 @@ class T5VisionModel(nn.Module):
         self.T5_model = T5ForConditionalGeneration.from_pretrained(self.T5_version)
         self.T5_model.resize_token_embeddings(len(self.tokenizer))
 
-        self.load_clip_to_t5_mapping()
+    def get_clip_text_features(self, text):
+        x = self.vision_model.token_embedding(text).type(self.vision_model.dtype)  # [batch_size, n_ctx, d_model]
 
-    def load_clip_to_t5_mapping(self):
-        os.makedirs("mapping", exist_ok=True)
-        PATH_TO_MAPPING = f"mapping/{self.vision_encoder.replace('/','_')}_{self.T5_version}.npy"
-        if os.path.exists(PATH_TO_MAPPING):
-            print(f"Loading mapping from {PATH_TO_MAPPING}")
-            self.W = torch.FloatTensor(np.load(PATH_TO_MAPPING)).to(self.device)
-            self.W /= 20
-        else:
-            vocab = self.tokenizer.get_vocab()
-            A = []
-            B = []
-            print(f"Creating W from {self.vision_encoder} to {self.T5_version} ...")
-            for word, vocab_id in tqdm(vocab.items()):
-                clip_word_encoding = clip.tokenize([word]).to(self.device)
-                clip_word_emb = self.vision_model.encode_text(clip_word_encoding)
-                T5_word_emb = self.T5_model.shared(torch.LongTensor([vocab_id]))
-                A.append(clip_word_emb.detach().cpu().numpy())
-                B.append(T5_word_emb.detach().cpu().numpy())
-            A = np.concatenate(A, axis=0)
-            B = np.concatenate(B, axis=0)
+        x = x + self.vision_model.positional_embedding.type(self.vision_model.dtype)
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = self.vision_model.transformer(x)
+        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = self.vision_model.ln_final(x).type(self.vision_model.dtype)
 
-            # Least squares solution
-            W = np.linalg.inv(A.T @ A) @ A.T @ B
-            print(f"Saved W to {PATH_TO_MAPPING}")
-            np.save(PATH_TO_MAPPING, W)
-            self.W = torch.FloatTensor(W).to(self.device)
+        # x.shape = [batch_size, n_ctx, transformer.width]
+        # take features from the eot embedding (eot_token is the highest number in each sequence)
+        x = x @ self.vision_model.text_projection
 
 
     # Returns [batch_sz, grid ** 2 + 1, hidden_dim]
@@ -87,7 +82,10 @@ class T5VisionModel(nn.Module):
         if self.vision_model.visual.proj is not None:
             x = x @ self.vision_model.visual.proj
 
-        #x = x @ self.W
+        x = x / x.norm(dim=1, keepdim=True)
+
+        if self.use_mapping:
+            x = self.mapping.linear_relu_stack(x)
 
         return x
 
@@ -114,7 +112,7 @@ class T5VisionModel(nn.Module):
         )
 
         question_embedding = self.T5_model.shared(encoding["input_ids"].to(self.device))
-        
+        question_embedding = question_embedding / question_embedding.norm(dim=1, keepdim=True)
         
         
         attention_mask = encoding.attention_mask.to(self.device)
@@ -122,32 +120,30 @@ class T5VisionModel(nn.Module):
             combined_embedding = self.insert_image_features(image_embeddings, question_embedding, encoding.attention_mask)
         else:
             combined_embedding = question_embedding.to(self.device)
-        
-        norm = combined_embedding.pow(2).sum(keepdim=True, dim=2).sqrt()
-        combined_embedding = combined_embedding / norm
+    
 
         # PCA CODE
 
-        data = combined_embedding.detach().cpu().numpy()[0]
+        # data = combined_embedding.detach().cpu().numpy()[0]
 
-        scaler = StandardScaler()
-        scaler.fit(data)
-        data=scaler.transform(data)    
-        labels = np.zeros(data.shape[0])
-        labels[-51:-1] = 1
+        # scaler = StandardScaler()
+        # scaler.fit(data)
+        # data=scaler.transform(data)    
+        # labels = np.zeros(data.shape[0])
+        # labels[-51:-1] = 1
 
-        pca = PCA()
-        x_new = pca.fit_transform(data)
-        my_colors = np.where(labels == 1, "red", "blue")
-        fig = plt.figure()
-        plt.scatter(x_new[:,0], x_new[:,1],color=my_colors)
-        plt.savefig(f"pca_{batch['question_id'][0]}.png")
+        # pca = PCA()
+        # x_new = pca.fit_transform(data)
+        # my_colors = np.where(labels == 1, "red", "blue")
+        # fig = plt.figure()
+        # plt.scatter(x_new[:,0], x_new[:,1],color=my_colors)
+        # plt.savefig(f"pca_{batch['question_id'][0]}.png")
 
-        test = combined_embedding.detach().cpu().numpy()
-        fig, ax = plt.subplots(1, len(test[0]), figsize=(200,10))
-        for i in range(len(test[0])):
-            ax[i].hist(test[0][i])
-        plt.savefig("test.png")
+        # test = combined_embedding.detach().cpu().numpy()
+        # fig, ax = plt.subplots(1, len(test[0]), figsize=(200,10))
+        # for i in range(len(test[0])):
+        #     ax[i].hist(test[0][i])
+        # plt.savefig("test.png")
         
         return combined_embedding, attention_mask, encoding
 
@@ -161,7 +157,7 @@ class T5VisionModel(nn.Module):
             question_embedding[i, len_sentence - n_padding - n_image_tokens - 1:len_sentence - n_padding - 1, :] = image_features[i]
         return question_embedding
 
-    def predict_sequence(self, batch):
+    def predict(self, batch):
 
         combined_embedding, attention_mask, _ = self.prepare_input(batch)
 

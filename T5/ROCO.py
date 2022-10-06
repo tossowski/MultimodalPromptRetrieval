@@ -12,10 +12,13 @@ from transformers import T5Tokenizer, T5ForConditionalGeneration
 
 
 class ROCOFeatureDataset(Dataset):
-    def __init__(self):
+    def __init__(self, mode="train", clip_type="PubMedClip"):
         super(ROCOFeatureDataset, self).__init__()
 
-        PATH_TO_CACHED_FEATURES = "/data/ossowski/roco-dataset"
+        self.clip_type = clip_type
+        self.mode = mode
+        PATH_TO_CACHED_FEATURES = f"/data/ossowski/roco-dataset/data/{clip_type}/{mode}"
+        os.makedirs(PATH_TO_CACHED_FEATURES, exist_ok=True)
 
         if os.path.exists(os.path.join(f"{PATH_TO_CACHED_FEATURES}", "clip_text.npy")):
 
@@ -30,7 +33,12 @@ class ROCOFeatureDataset(Dataset):
         PATH_TO_CACHED_FEATURES = path
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
+
         model, preprocess = clip.load("ViT-B/32", device=device)
+
+        if self.clip_type == "PubMedClip":
+            checkpoint = torch.load("models/PubMedCLIP_ViT32.pth")
+            model.load_state_dict(checkpoint['state_dict'])
         model = model.float()
         tokenizer = T5Tokenizer.from_pretrained("t5-small")
         T5_model = T5ForConditionalGeneration.from_pretrained("t5-small").to(device)
@@ -39,7 +47,7 @@ class ROCOFeatureDataset(Dataset):
         clip_text_feats = []
         clip_image_feats = []
 
-        PATH_TO_DATA = "/data/ossowski/roco-dataset/data/train/radiology"
+        PATH_TO_DATA = os.path.join(f"/data/ossowski/roco-dataset/data/{self.mode}", "radiology")
         with open(os.path.join(PATH_TO_DATA, "captions.txt"), "r") as f:
             num_lines = sum(1 for line in open(os.path.join(PATH_TO_DATA, "captions.txt"),'r'))
             for _, line in enumerate(tqdm(f, total = num_lines)):
