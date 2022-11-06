@@ -1,13 +1,12 @@
-from cmath import inf
 import json
-import numpy as np
 from PIL import Image
 import torch
 import os
 import pickle
 import clip
+from tqdm import tqdm
 from torch.utils.data import Dataset,DataLoader
-
+from torch.nn.utils.rnn import pad_sequence
 
 
 
@@ -20,7 +19,7 @@ class VQADataset(Dataset):
         self.device = device
         
 
-        _, self.preprocess = clip.load("ViT-B/32", device=device)
+        self.clip_model, self.preprocess = clip.load("ViT-B/32", device=device)
         
         images_path = os.path.join(dataroot, f'images_{name}.pkl')
         if os.path.exists(images_path):
@@ -81,7 +80,6 @@ class VQADataset(Dataset):
             print(f"There are {len(possible_open_answers)} open and {len(possible_closed_answers)} closed answers")
             answer_set = sorted(possible_open_answers)[:num//2] + sorted(possible_closed_answers)[:num//2]
         self.entries = [x for x in self.entries if x["answer"] in answer_set]
-        print(len(set([x["answer"] for x in self.entries])))
         #print(f"Filtered {num} answers. There are now {len(self.entries)} examples in dataset")
         return answer_set
 
@@ -105,6 +103,59 @@ class VQADataset(Dataset):
             if self.entries[i]["question_id"] == qid:
                 return self.__getitem__(i)
 
+    def create_retrieval_dataset(self, data_loader, prefix):
+        embedding_path = os.path.join("cache", prefix, self.__class__.__name__, "embedding.pt")
+        answer_path = os.path.join("cache", prefix, self.__class__.__name__, "answers.pkl")
+        if os.path.exists(embedding_path) and os.path.exists(answer_path):
+            
+            self.retrieval_embeddings = torch.load(embedding_path)
+            print(f"Loaded cached qa lookup embeddings from {embedding_path} ...")
+            with open(answer_path, 'rb') as f:
+                self.retrieval_answers = pickle.load(f)
+                print(f"Loaded cached qa lookup answers from {answer_path} ...")
+        else:
+            os.makedirs(os.path.join("cache", prefix, self.__class__.__name__), exist_ok=True)
+            print(f"Creating qa pairs in {os.path.join('cache', prefix, self.__class__.__name__)} ...")
+            all_embeddings = []
+            all_answers = []
+            for batch in tqdm(data_loader):
+                image_encoding = self.clip_model.encode_image(batch["image"].to(self.device))
+                text_encoding = self.clip_model.encode_text(clip.tokenize(batch["question"]).to(self.device))
+                answers = batch["answer"]
+                all_embeddings.append(torch.cat([image_encoding,text_encoding], axis=1).detach())
+                all_answers.extend(answers)
+
+            
+            #answers = torch.cat(answers, axis = 0)
+            self.retrieval_embeddings = torch.cat(all_embeddings, axis=0)
+            self.retrieval_answers = all_answers
+            torch.save(self.retrieval_embeddings, embedding_path)
+            with open(answer_path, 'wb') as f:
+                pickle.dump(all_answers, f)
+
+    def retrieve_closest_qa_pairs(self, batch):
+        buckets = ["very unlikely", "unlikely", "maybe", "likely", "very likely", "certainly"]
+        image_encoding = self.clip_model.encode_image(batch["image"].to(self.device))
+        text_encoding = self.clip_model.encode_text(clip.tokenize(batch["question"]).to(self.device))
+        combined = torch.cat([image_encoding,text_encoding], axis=1)
+        dist_matrix = torch.cdist(combined, self.retrieval_embeddings)
+        top15_closest_indices = torch.argsort(dist_matrix, axis = 1)[:,1:16]
+        answers = [[self.retrieval_answers[x] for x in top15_closest_indices[i,:]] for i in range(len(top15_closest_indices))]
+        prompts = []
+        for row in answers:
+            answer_counts = {}
+            for answer in row:
+                if answer not in answer_counts:
+                    answer_counts[answer] = 0
+                answer_counts[answer] += 1
+            pred_answer = max(answer_counts, key = answer_counts.get)
+            certainty = max(answer_counts.values())/sum(answer_counts.values())
+            prompt = buckets[int(certainty * (len(buckets) - 1))]
+            prompts.append(f"I believe the answer is {prompt} {pred_answer}")
+        return prompts
+
+
+
     def __len__(self):
         return len(self.entries)
     
@@ -119,5 +170,7 @@ class VQADataset(Dataset):
         item['task'] = entry['task']
         item['question_id'] = entry['question_id']
         item['question_type'] = entry['question_type']
-        item['labels'] = entry['labels']
+
+        if 'labels' in entry:
+            item['labels'] = entry['labels']
         return item

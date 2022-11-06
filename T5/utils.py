@@ -8,12 +8,53 @@ import torch
 from copy import deepcopy
 from PIL import Image
 
+def get_model_prefix(CFG):
+    data_name = CFG["dataset"]
+    use_image_info = bool(CFG["use_image_info"])
+
+    MODEL_PREFIX = f"model_{data_name}"
+    if use_image_info:
+        MODEL_PREFIX += "_with_vision"
+    else:
+        MODEL_PREFIX += "_no_vision"
+
+    if CFG["vision_checkpoint"]:
+        MODEL_PREFIX += "_with_pretrained_checkpoint"
+    else:
+        MODEL_PREFIX += "_no_pretrained_checkpoint"
+
+    if CFG["fewshot_training_tasks"]["enabled"]:
+        MODEL_PREFIX += "_fewshot"
+
+    if CFG["mapping_checkpoint"]:
+        MODEL_PREFIX += "_with_mapping"
+
+    if CFG["use_prediction_head"]:
+        if CFG["use_BAN"]:
+            MODEL_PREFIX += "_pred_headBAN"
+        else:
+            MODEL_PREFIX += "_pred_head"
+
+    if CFG["freeze"]:
+        MODEL_PREFIX += "_freeze" 
+
+    if "retrieval" in CFG and CFG["retrieval"]:
+        MODEL_PREFIX += "_retrieval"
+
+    return MODEL_PREFIX
+
+def cosine_similarity(x1, x2, dim=1, eps=1e-8):
+    """Returns cosine similarity between x1 and x2, computed along dim."""
+    w12 = torch.sum(x1 * x2, dim)
+    w1 = torch.norm(x1, 2, dim)
+    w2 = torch.norm(x2, 2, dim)
+    return (w12 / (w1 * w2).clamp(min=eps)).squeeze()
+
 def create_ans2label(dataset_train, dataset_validate, dataset_test):
     samples = deepcopy(dataset_train.entries)
     samples.extend(dataset_validate.entries)
     samples.extend(dataset_test.entries)
     possible_answers = sorted(set([sample['answer'].lower() for sample in samples]))
-    print(len(possible_answers))
     ans_to_label = {}
     label_to_ans = {}
     for i in range(len(possible_answers)):
@@ -27,17 +68,15 @@ def get_validation_loss(model, validate_loader):
     print("Calculating Validation Loss ...")
     model.eval()
     total = 0
-    total_ans = 0
-    total_correct_ans = 0
-    for batch in tqdm(validate_loader):
-        loss = model(batch)
-        pred = model.predict(batch)
-        # total_correct_ans += torch.sum(torch.eq(batch["labels"].to(model.device), pred))
-        # total_ans += len(batch["labels"])
-        
-        total += loss.item()
-    #print(f"Valid acc is: {total_correct_ans / total_ans}")
-    return total / len(validate_loader.dataset)
+    with torch.no_grad():
+        for batch in tqdm(validate_loader):
+            loss = model(batch)
+            # total_correct_ans += torch.sum(torch.eq(batch["labels"].to(model.device), pred))
+            # total_ans += len(batch["labels"])
+            
+            total += loss.item()
+        #print(f"Valid acc is: {total_correct_ans / total_ans}")
+        return total / len(validate_loader.dataset)
 
 # Weights are tuple of length n_layers
 # Each entry of tuple is of shape (batch_sz, n_heads, seq_len, seq_len)
@@ -93,7 +132,6 @@ def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
 
     for i in range(n_layers):
         for j in range(n_heads):
-            print(min(10 * len(final_tokens_Y), 2**16-1))
             fig, ax = plt.subplots(1, len(final_tokens_Y) + 1, figsize=(min(10 * len(final_tokens_Y), 2**16-1),20))
             #if i == 3 and j == 0:
 

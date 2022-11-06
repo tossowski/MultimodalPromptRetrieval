@@ -7,7 +7,7 @@ from VQA_RAD import VQARADFeatureDataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from collections import defaultdict
-from utils import get_validation_loss, visualize_attn_weights, create_ans2label
+from utils import get_validation_loss, visualize_attn_weights, create_ans2label, get_model_prefix
 
 import torch
 import argparse
@@ -31,52 +31,22 @@ CFG = json.load(open(os.path.join("config", args.config)))
 
 data_name = CFG["dataset"]
 use_image_info = bool(CFG["use_image_info"])
-
 MODEL_SAVE_FOLDER = "./models"
 
 if args.model_file:
     MODEL_SAVE_PATH = args.model_file
     print(f"Model will be saved/loaded from {MODEL_SAVE_PATH}")
 else:
-    MODEL_PREFIX = f"model_{data_name}"
-    if use_image_info:
-        MODEL_PREFIX += "_with_vision"
-    else:
-        MODEL_PREFIX += "_no_vision"
-
-    if CFG["vision_checkpoint"]:
-        MODEL_PREFIX += "_with_pretrained_checkpoint"
-    else:
-        MODEL_PREFIX += "_no_pretrained_checkpoint"
-
-    if CFG["fewshot_training_tasks"]["enabled"]:
-        MODEL_PREFIX += "_fewshot"
-
-    if CFG["mapping_checkpoint"]:
-        MODEL_PREFIX += "_with_mapping"
-    else:
-        MODEL_PREFIX += "_no_mapping"
-
-    if CFG["use_prediction_head"]:
-        if CFG["use_BAN"]:
-            MODEL_PREFIX += "_pred_headBAN"
-        else:
-            MODEL_PREFIX += "_pred_head"
-    else:
-        MODEL_PREFIX += ""
-
-    if CFG["freeze"]:
-        MODEL_PREFIX += "_freeze"
+    MODEL_PREFIX = get_model_prefix(CFG)
 
     MODEL_SAVE_PATH = os.path.join(MODEL_SAVE_FOLDER, MODEL_PREFIX + ".pt")
     print(f"Model will be saved/loaded from {MODEL_SAVE_PATH}")
 
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
+device = "cuda" if torch.cuda.is_available() else "cpu"
 max_source_length = CFG["max_source_length"]
 max_target_length = CFG["max_target_length"]
 
 torch.manual_seed(CFG["seed"])
-
 if data_name == "VQA_RAD":
     dataset_train = VQARADFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device) 
     # VQA_RAD doesn't have validation data, so use subset of train to estimate
@@ -98,11 +68,10 @@ else:
     dataset_validate = VQASLAKEFeatureDataset("validate", os.path.join(CFG["datafolder"],data_name), device=device)
     dataset_test = VQASLAKEFeatureDataset("test", os.path.join(CFG["datafolder"],data_name), device=device)
 
-if CFG["max_answers"]:
+if "max_answers" in CFG and CFG["max_answers"]:
     answer_set = dataset_train.filter_max_answers(CFG["max_answers"], config=CFG)
     dataset_validate.filter_max_answers(CFG["max_answers"], answer_set)
     dataset_test.filter_max_answers(CFG["max_answers"], answer_set)
-    print(f"Train data has {len(dataset_train)} examples\nValidation data has {len(dataset_validate)} examples\nTest data has {len(dataset_test)} examples")
     
 
 
@@ -110,7 +79,6 @@ label2ans, ans2label = create_ans2label(dataset_train, dataset_validate, dataset
 dataset_train.add_labels(ans2label)
 dataset_validate.add_labels(ans2label)
 dataset_test.add_labels(ans2label)
-print(ans2label)
 
 if CFG["fewshot_training_tasks"]["enabled"]:
     #tasks = list(set([x["task"] for x in dataset_train.entries]))
@@ -126,23 +94,34 @@ if CFG["fewshot_training_tasks"]["enabled"]:
 print(f"Train data has {len(dataset_train)} examples\nValidation data has {len(dataset_validate)} examples\nTest data has {len(dataset_test)} examples")
 
 train_loader = DataLoader(dataset_train, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
+
 validate_loader = DataLoader(dataset_validate, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
+#validate_loader = DataLoader(dataset_validate, 1, shuffle=True, num_workers=2)
+
 test_loader = DataLoader(dataset_test, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
+
+if "retrieval" in CFG and CFG["retrieval"]:
+    print("should retrieve")
+    dataset_train.create_retrieval_dataset(train_loader, MODEL_PREFIX)
+    retrieval_function = dataset_train.retrieve_closest_qa_pairs
+else:
+    retrieval_function = None
 
 if CFG["use_prediction_head"]:
     if CFG["use_BAN"]:
-        model = T5VisionModelPredictionHeadBAN(len(ans2label), vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=CFG["mapping_checkpoint"], glimpse=CFG["glimpse"]).to(device)
+        model = T5VisionModelPredictionHeadBAN(len(ans2label), vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=CFG["mapping_checkpoint"], glimpse=CFG["glimpse"], retrieval_function = retrieval_function).to(device)
     else:
-        if CFG["max_answers"]:
-            model = T5VisionModelPredictionHead(CFG["max_answers"], vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=CFG["mapping_checkpoint"]).to(device)
+        if "max_answers" in CFG and CFG["max_answers"]:
+            model = T5VisionModelPredictionHead(CFG["max_answers"], vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=CFG["mapping_checkpoint"], retrieval_function = retrieval_function).to(device)
         else:
-            model = T5VisionModelPredictionHead(len(ans2label), vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=CFG["mapping_checkpoint"]).to(device)
+            model = T5VisionModelPredictionHead(len(ans2label), vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=CFG["mapping_checkpoint"], retrieval_function = retrieval_function).to(device)
 
 else:
     if CFG["freeze"]:
-        model = T5VisionModelFrozen(vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=CFG["mapping_checkpoint"]).to(device)   
+        model = T5VisionModelFrozen(vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=CFG["mapping_checkpoint"], retrieval_function = retrieval_function).to(device)   
     else:
-        model = T5VisionModel(vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=CFG["mapping_checkpoint"]).to(device)
+        model = T5VisionModel(vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=CFG["mapping_checkpoint"], retrieval_function = retrieval_function).to(device)
+
 
 
 learning_rate = CFG["hyperparameters"]["learning_rate"]
@@ -153,7 +132,7 @@ if args.train:
     best_valid_loss = float("inf")
     best_epoch = 0
     for epoch in range(CFG["hyperparameters"]["epochs"]):
-        #model.train()
+        model.train()
         print(f"Starting epoch {epoch} ...")
         train_total = 0
         train_batch = 0
@@ -207,6 +186,27 @@ if args.test:
 
     incorrect_ids = []
     correct_ids = []
+
+    # encoding = model.tokenizer(
+    #     ["Answer the KG question: What is the function of the bladder? Based on the image: [itk]"],
+    #     padding="longest",
+    #     max_length=model.max_source_length,
+    #     truncation=True,
+    #     return_tensors="pt",
+    #     )
+
+    # question_embedding = model.T5_model.shared(encoding["input_ids"].to(device)) 
+    # attention_mask = encoding.attention_mask.to(device)
+    # output_sequences = model.T5_model.generate(
+    #     inputs_embeds = question_embedding,
+    #     attention_mask=attention_mask,
+    #     do_sample=False,  # disable sampling to test if batching affects output
+    #     max_new_tokens=20
+    #     )
+
+    # predicted_answers = model.tokenizer.batch_decode(output_sequences, skip_special_tokens=True)
+    # print(predicted_answers)
+    
     for batch in tqdm(test_loader):
         predicted_answers = model.predict(batch)
 
@@ -257,7 +257,7 @@ if args.test:
         for qid in correct_ids:
             f.write(qid + "\n")
 
-    with open(os.path.join("logs", "200EPOCH_NO_MODEL_TRAIN_" + MODEL_PREFIX + ".txt"), "w") as f:
+    with open(os.path.join("logs", "model_performance.txt"), "w") as f:
         for key, val in performance.items():
             f.write(f"{key},{round(val, 2)}\n")
         f.write(f"Open,{round(open_correct/open_total, 2)}\n")
@@ -280,6 +280,6 @@ if args.eval:
             #if qid == "12098":
             info = dataset_test.get_question_by_id(qid)
             batch = test_loader.collate_fn([info])
-
-            visualize_attn_weights(model, batch, attn_type = "cross_attentions")
-            print(f"Finished image {i} out of {num_lines}")
+            if batch["task"][0] == "KG":
+                visualize_attn_weights(model, batch, attn_type = "cross_attentions")
+                print(f"Finished image {i} out of {num_lines}")
