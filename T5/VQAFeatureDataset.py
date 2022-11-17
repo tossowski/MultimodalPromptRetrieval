@@ -7,6 +7,8 @@ import clip
 from tqdm import tqdm
 from torch.utils.data import Dataset,DataLoader
 from torch.nn.utils.rnn import pad_sequence
+from difflib import SequenceMatcher
+
 
 
 
@@ -46,7 +48,12 @@ class VQADataset(Dataset):
     def add_labels(self, ans2label):
         for i in range(len(self.entries)):
             answer = self.entries[i]["answer"]
-            self.entries[i]["labels"] = ans2label[answer]
+            self.entries[i]["label"] = ans2label[answer]
+    
+    def get_closest_label(self, answer):
+        closest = sorted(self.entries, key = lambda x: SequenceMatcher(None, x["answer"], answer).ratio(), reverse=True)
+        #print(closest[0]["label"])
+        return closest[0]["label"]
 
     def _load_dataset(self, dataroot, name):
         data_path = os.path.join(dataroot, name + '.json')
@@ -108,7 +115,7 @@ class VQADataset(Dataset):
         answer_path = os.path.join("cache", prefix, self.__class__.__name__, "answers.pkl")
         if os.path.exists(embedding_path) and os.path.exists(answer_path):
             
-            self.retrieval_embeddings = torch.load(embedding_path)
+            self.retrieval_embeddings = torch.load(embedding_path, map_location=torch.device(self.device)).float()
             print(f"Loaded cached qa lookup embeddings from {embedding_path} ...")
             with open(answer_path, 'rb') as f:
                 self.retrieval_answers = pickle.load(f)
@@ -171,6 +178,6 @@ class VQADataset(Dataset):
         item['question_id'] = entry['question_id']
         item['question_type'] = entry['question_type']
 
-        if 'labels' in entry:
-            item['labels'] = entry['labels']
+        if 'label' in entry:
+            item['label'] = entry['label']
         return item

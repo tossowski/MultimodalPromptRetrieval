@@ -4,6 +4,7 @@ from T5VisionModel import T5VisionModel
 from T5VisionModelFrozen import T5VisionModelFrozen
 from SLAKE import VQASLAKEFeatureDataset
 from VQA_RAD import VQARADFeatureDataset
+from ROCO import ROCOFeatureDataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from collections import defaultdict
@@ -47,6 +48,7 @@ max_source_length = CFG["max_source_length"]
 max_target_length = CFG["max_target_length"]
 
 torch.manual_seed(CFG["seed"])
+data_name="VQA_RAD"
 if data_name == "VQA_RAD":
     dataset_train = VQARADFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device) 
     # VQA_RAD doesn't have validation data, so use subset of train to estimate
@@ -63,10 +65,14 @@ if data_name == "VQA_RAD":
     #dataset_validate = VQARADFeatureDataset("test", os.path.join(CFG["datafolder"],data_name), device=device) 
     
     dataset_test = VQARADFeatureDataset("test", os.path.join(CFG["datafolder"],data_name), device=device)
-else:
+elif data_name == "SLAKE":
     dataset_train = VQASLAKEFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device)
     dataset_validate = VQASLAKEFeatureDataset("validate", os.path.join(CFG["datafolder"],data_name), device=device)
     dataset_test = VQASLAKEFeatureDataset("test", os.path.join(CFG["datafolder"],data_name), device=device)
+elif data_name == "ROCO":
+    dataset_train = ROCOFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device)
+    dataset_validate = ROCOFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device)
+    dataset_test = ROCOFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device)
 
 if "max_answers" in CFG and CFG["max_answers"]:
     answer_set = dataset_train.filter_max_answers(CFG["max_answers"], config=CFG)
@@ -143,13 +149,13 @@ if args.train:
             pred = model.predict(batch)
 
             if CFG["use_prediction_head"]:
-                total_correct_ans += torch.sum(torch.eq(batch["labels"].to(model.device), pred))
-                total_ans += len(batch["labels"])
+                total_correct_ans += torch.sum(torch.eq(batch["label"].to(model.device), pred))
+                total_ans += len(batch["label"])
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            train_total += loss.item()
+            train_total += loss.item() * batch["image"].shape[0]
         if CFG["use_prediction_head"]:
             print(f"Train acc is: {total_correct_ans / total_ans}")
         else:
@@ -170,7 +176,7 @@ if args.train:
 # Test
 if args.test:
     #MODEL_SAVE_PATH = "./models/model_SLAKE_with_vision.pt" # For OOD Testing
-    checkpoint = torch.load(MODEL_SAVE_PATH)
+    checkpoint = torch.load(MODEL_SAVE_PATH, map_location=torch.device(device))
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
@@ -183,6 +189,8 @@ if args.test:
     closed_correct = 0
     open_total = 0
     closed_total = 0
+
+    string_match_correct = 0
 
     incorrect_ids = []
     correct_ids = []
@@ -209,13 +217,18 @@ if args.test:
     
     for batch in tqdm(test_loader):
         predicted_answers = model.predict(batch)
-
-
-        
         
         for i in range(len(predicted_answers)):
+            #print(test_loader.dataset.get_closest_label(batch["answer"][i].lower()), batch["label"][i], batch["answer"][i].lower(), predicted_answers[i].lower())
+            if not CFG["use_prediction_head"]:
+                if test_loader.dataset.get_closest_label(predicted_answers[i].lower()) == batch["label"][i].item():
+                    string_match_correct += 1
+                    if predicted_answers[i].lower() != batch["answer"][i].lower():
+                        print(predicted_answers[i].lower(), batch["answer"][i].lower())
+                #print(string_match_correct)
+            
             if CFG["use_prediction_head"]:
-                is_correct = predicted_answers[i] == batch["labels"][i]
+                is_correct = predicted_answers[i] == batch["label"][i]
             else:
                 is_correct = predicted_answers[i].lower() == batch["answer"][i].lower()
             
@@ -241,12 +254,15 @@ if args.test:
 
     print("=======QUESTION TYPE PERFORMANCE=======")
     for key, val in performance.items():
-        print(f"{key}: {round(val, 2)}")
+        print(f"{key}: {val:.3f}")
     print("=======OPEN VS CLOSED PERFORMANCE======")
-    print(f"Open: {round(open_correct/open_total, 2)}")
-    print(f"Closed: {round(closed_correct/closed_total, 2)}")
+    print(f"Open: {open_correct/open_total:.3f}")
+    print(f"Closed: {closed_correct/closed_total:.3f}")
     print("===========OVERALL PERFORMANCE=========")
-    print(f"Overall accuracy: {round(sum(correct.values())/sum(total.values()), 2)}")
+    print(f"Overall accuracy: {sum(correct.values())/sum(total.values()):.3f}")
+
+    if not CFG["use_prediction_head"]:
+        print(f"String match correct: {string_match_correct / sum(total.values()):.3f}")
         #print([batch['answer'][i] + "|||" + predicted_answers[i] for i in range(len(predicted_answers))])
     os.makedirs("logs", exist_ok=True)
     with open(os.path.join("logs", "incorrect_ids.txt"), "w") as f:
@@ -257,15 +273,16 @@ if args.test:
         for qid in correct_ids:
             f.write(qid + "\n")
 
-    with open(os.path.join("logs", "model_performance.txt"), "w") as f:
-        for key, val in performance.items():
-            f.write(f"{key},{round(val, 2)}\n")
-        f.write(f"Open,{round(open_correct/open_total, 2)}\n")
-        f.write(f"Closed: {round(closed_correct/closed_total, 2)}\n")
-        f.write(f"Overall,{round(sum(correct.values())/sum(total.values()), 2)}")
+    with open(os.path.join("logs", MODEL_PREFIX + "performance.txt"), "w") as f:
+        for key in  sorted(performance.keys()):
+            val = performance[key]
+            f.write(f"{val:.4f}\n")
+        f.write(f"Open,{(open_correct/open_total):.4f}\n")
+        f.write(f"Closed: {(closed_correct/closed_total):.4f}\n")
+        f.write(f"Overall,{(sum(correct.values())/sum(total.values())):.4f}")
 
 if args.eval:
-    checkpoint = torch.load(MODEL_SAVE_PATH)
+    checkpoint = torch.load(MODEL_SAVE_PATH, map_location=torch.device(device))
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
@@ -281,5 +298,5 @@ if args.eval:
             info = dataset_test.get_question_by_id(qid)
             batch = test_loader.collate_fn([info])
             if batch["task"][0] == "KG":
-                visualize_attn_weights(model, batch, attn_type = "cross_attentions")
+                visualize_attn_weights(model, batch, attn_type = "encoder_attentions")
                 print(f"Finished image {i} out of {num_lines}")

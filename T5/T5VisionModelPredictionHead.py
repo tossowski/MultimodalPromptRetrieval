@@ -15,8 +15,9 @@ from T5VisionModel import T5VisionModel
 from create_mapping import CrossModalMapping
 
 class T5VisionModelPredictionHead(T5VisionModel):
-    def __init__(self, num_classes, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None, mapping_checkpoint=None):
-        super().__init__(vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None, mapping_checkpoint=None)
+    def __init__(self, num_classes, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None, mapping_checkpoint=None, retrieval_function=None):
+        super().__init__(vision_encoder = vision_encoder, T5_version = T5_version, max_source_length = max_source_length, max_target_length = max_target_length, use_image_info=use_image_info, vision_checkpoint=vision_checkpoint, mapping_checkpoint=mapping_checkpoint, retrieval_function=retrieval_function)
+        
         self.loss_fn = torch.nn.CrossEntropyLoss()
  
         self.num_classes = num_classes

@@ -27,12 +27,12 @@ class T5VisionModel(nn.Module):
             #print(self.T5_version.shared)
             print(f"Loading Mapping Model: {mapping_checkpoint}")
             self.mapping = CrossModalMapping(512, 512).to(self.device)
-            checkpoint = torch.load(mapping_checkpoint)
+            checkpoint = torch.load(mapping_checkpoint, map_location=torch.device(self.device))
             self.mapping.load_state_dict(checkpoint['model_state_dict'])
         
         if vision_checkpoint:
             print(f"Loading pretrained vision checkpoint: {vision_checkpoint}")
-            checkpoint = torch.load(vision_checkpoint)
+            checkpoint = torch.load(vision_checkpoint, map_location=torch.device(self.device))
             self.vision_model.load_state_dict(checkpoint['state_dict'])
 
         self.vision_model = self.vision_model.float()

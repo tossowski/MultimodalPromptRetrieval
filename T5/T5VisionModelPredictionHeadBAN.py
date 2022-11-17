@@ -5,10 +5,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from T5VisionModel import T5VisionModel
-from create_mapping import CrossModalMapping
 from network.connect import FCNet
 from network.connect import BCNet
 from torch.nn.utils.weight_norm import weight_norm
+from matplotlib import pyplot as plt
 
 # Bilinear Attention
 class BiAttention(nn.Module):
@@ -76,8 +76,8 @@ class BiResNet(nn.Module):
 
 
 class T5VisionModelPredictionHeadBAN(T5VisionModel):
-    def __init__(self, num_classes, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None, mapping_checkpoint=None, glimpse = 10):
-        super().__init__(vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None, mapping_checkpoint=None)
+    def __init__(self, num_classes, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None, mapping_checkpoint=None, glimpse = 10, retrieval_function=None):
+        super().__init__(vision_encoder = vision_encoder, T5_version = T5_version, max_source_length = max_source_length, max_target_length = max_target_length, use_image_info=use_image_info, vision_checkpoint=vision_checkpoint, mapping_checkpoint=mapping_checkpoint, retrieval_function=retrieval_function)
         self.loss_fn = torch.nn.CrossEntropyLoss()
  
         self.num_classes = num_classes
@@ -105,6 +105,11 @@ class T5VisionModelPredictionHeadBAN(T5VisionModel):
         question_features = output['encoder_last_hidden_state']
         image_features = image_embeddings 
         attn, _ = self.BAN_att(image_features, question_features)
+        #print(image_features.shape, question_features.shape, attn.shape)
+        #print(torch.max(attn[0,0,:,:]), torch.min(attn[0,0,:,:]))
+        #fig = plt.figure()
+        #plt.imshow(attn[0,0,:,:].detach().cpu().numpy())
+        #plt.savefig(f"figures/{batch['question_id'][0]}.png")
         resnet_output = self.BAN_resnet(image_features,question_features,attn)
         dropped = self.prediction_dropout(resnet_output)
         logits = self.prediction_head(dropped)

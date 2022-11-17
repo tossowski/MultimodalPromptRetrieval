@@ -4,18 +4,38 @@ import numpy as np
 from PIL import Image
 import torch
 import os
-import pickle
+import pandas as pd
 import clip
 from tqdm import tqdm
 from torch.utils.data import Dataset,DataLoader
 from transformers import T5Tokenizer, T5ForConditionalGeneration
+from VQAFeatureDataset import VQADataset
 
+class ROCOFeatureDataset(VQADataset):
 
-class ROCOFeatureDataset(Dataset):
-    def __init__(self, mode="train", clip_type="PubMedClip"):
-        super(ROCOFeatureDataset, self).__init__()
+    def _load_dataset(self, dataroot, name):
+
+        data_path = os.path.join(dataroot, f'{name}.csv')
+        samples_all = pd.read_csv(data_path)
+        entries = []
+        for idx, entry in samples_all.iterrows():
+            
+            sample = {'image_name' : entry['image_id'],
+                'question': entry['question'].lower(),
+                'answer' : str(entry['answer']).lower(),
+                'task': entry['q_type'],
+                'question_id': idx,
+                'question_type': entry['question_type'].lower()}
+            entries.append(sample)
+
+        
+        return entries
+
+    def __init__(self, name, dataroot, mode="train", clip_type="PubMedClip", device = "cuda"):
+        super(ROCOFeatureDataset, self).__init__(name, dataroot, device)
 
         self.clip_type = clip_type
+        self.device = device
         self.mode = mode
         PATH_TO_CACHED_FEATURES = f"/data/ossowski/roco-dataset/data/{clip_type}/{mode}"
         os.makedirs(PATH_TO_CACHED_FEATURES, exist_ok=True)
@@ -32,16 +52,15 @@ class ROCOFeatureDataset(Dataset):
     def create_features(self, path):
         PATH_TO_CACHED_FEATURES = path
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        model, preprocess = clip.load("ViT-B/32", device=device)
+        model, preprocess = clip.load("ViT-B/32", device=self.device)
 
         if self.clip_type == "PubMedClip":
-            checkpoint = torch.load("models/PubMedCLIP_ViT32.pth")
+            checkpoint = torch.load("models/PubMedCLIP_ViT32.pth", map_location=torch.device(self.device))
             model.load_state_dict(checkpoint['state_dict'])
         model = model.float()
         tokenizer = T5Tokenizer.from_pretrained("t5-small")
-        T5_model = T5ForConditionalGeneration.from_pretrained("t5-small").to(device)
+        T5_model = T5ForConditionalGeneration.from_pretrained("t5-small").to(self.device)
 
         T5_text_feats = []
         clip_text_feats = []
@@ -57,7 +76,7 @@ class ROCOFeatureDataset(Dataset):
                 except:
                     print(os.path.join(PATH_TO_DATA, "images", f"{image_id}.jpg") + " not found!")
                     continue
-                text = clip.tokenize([caption], truncate=True).to(device)
+                text = clip.tokenize([caption], truncate=True).to(self.device)
                 with torch.no_grad():
                     image_features = model.encode_image(image)
                     text_features = model.encode_text(text)
@@ -91,14 +110,21 @@ class ROCOFeatureDataset(Dataset):
         self.clip_image_features = np.load(os.path.join(f"{PATH_TO_CACHED_FEATURES}", "clip_images.npy"))
         self.t5_text_features = np.load(os.path.join(f"{PATH_TO_CACHED_FEATURES}", "T5_text.npy"))
     
-    def __len__(self):
-        return len(self.clip_text_features)
+    # def __len__(self):
+    #     return len(self.entries)
     
 
-    def __getitem__(self, index):
-        item = {}
-        item["clip_text_features"] = self.clip_image_features[index]
-        item['clip_image_features'] = self.clip_text_features[index]
-        item['t5_text_features'] = self.t5_text_features[index]
+    # def __getitem__(self, index):
+    #     item = {}
+    #     entry = self.entries[index]
 
-        return item
+    #     item['image'] = self.images[entry['image_name']]
+    #     item['question'] = entry['question']
+    #     item['answer'] = entry['answer']
+    #     item['task'] = entry['task']
+    #     item['question_type'] = entry['question_type']
+    #     # item["clip_text_features"] = self.clip_image_features[index]
+    #     # item['clip_image_features'] = self.clip_text_features[index]
+    #     # item['t5_text_features'] = self.t5_text_features[index]
+
+    #     return item

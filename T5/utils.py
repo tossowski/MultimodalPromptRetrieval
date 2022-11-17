@@ -74,7 +74,7 @@ def get_validation_loss(model, validate_loader):
             # total_correct_ans += torch.sum(torch.eq(batch["labels"].to(model.device), pred))
             # total_ans += len(batch["labels"])
             
-            total += loss.item()
+            total += loss.item() * batch["image"].shape[0]
         #print(f"Valid acc is: {total_correct_ans / total_ans}")
         return total / len(validate_loader.dataset)
 
@@ -90,7 +90,8 @@ def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
     n_padding = int(n_padding.item())
 
     final_tokens_X = model.tokenizer.convert_ids_to_tokens(encoding.input_ids[0])
-    
+    final_tokens_X = ["ITK"] * 50 + final_tokens_X
+
     output_sequences = model.T5_model.generate(
         inputs_embeds = combined_embedding,
         attention_mask = attention_mask,
@@ -102,6 +103,7 @@ def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
         final_tokens_Y = final_tokens_X
     elif attn_type == "cross_attentions":
         final_tokens_Y = model.tokenizer.convert_ids_to_tokens(output_sequences[0])
+        #final_tokens_Y = ["ITK"] * 50 + final_tokens_Y
     
     predicted_answers = model.tokenizer.batch_decode(output_sequences, skip_special_tokens=True)
 
@@ -109,11 +111,13 @@ def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
     
     weights = output[attn_type]
 
+    
+    
     x_ticks = np.linspace(0, weights[0].shape[3] - 1, weights[0].shape[3])
     y_ticks = np.linspace(0, weights[0].shape[2] - 1, weights[0].shape[2])
     
     
-
+    print(len(final_tokens_X), len(x_ticks))
     # 6 layers, each layer has 8 attention heads
     
 
@@ -125,6 +129,7 @@ def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
     assert len(final_tokens_Y) == len(y_ticks)
 
     original_image = Image.open(batch["path_to_image"][0])
+    original_image = original_image.resize((224,224))
     image_x_ticks = np.linspace(0, original_image.width, grid_size + 1)
     image_y_ticks = np.linspace(0, original_image.height, grid_size + 1)
     grid_x_length = image_x_ticks[1] - image_x_ticks[0]
@@ -132,7 +137,7 @@ def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
 
     for i in range(n_layers):
         for j in range(n_heads):
-            fig, ax = plt.subplots(1, len(final_tokens_Y) + 1, figsize=(min(10 * len(final_tokens_Y), 2**16-1),20))
+            fig, ax = plt.subplots(1, len(final_tokens_Y) + 1, figsize=(min(len(final_tokens_Y) * 2, 650),20))
             #if i == 3 and j == 0:
 
             ax[0].imshow(weights[i][0,j,:,:].detach().cpu().numpy(), vmin=0, vmax=1)
@@ -153,9 +158,9 @@ def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
                 ax[k + 1].set_yticks(image_y_ticks)
 
                 if attn_type == "encoder_attentions":
-                    alphas = weights[i][0,j,-51:-1,k].detach().cpu().numpy()
+                    alphas = weights[i][0,j,1:51,k].detach().cpu().numpy()
                 elif attn_type == "cross_attentions":
-                    alphas = weights[i][0,j,k,-51:-1].detach().cpu().numpy()
+                    alphas = weights[i][0,j,k,1:51].detach().cpu().numpy()
                     
                 for l in range(grid_size):
                     for m in range(grid_size):
