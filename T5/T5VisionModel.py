@@ -38,7 +38,12 @@ class T5VisionModel(nn.Module):
         self.vision_model = self.vision_model.float()
         
         self.vision_model.visual.old_forward = self.vision_model.visual.forward
-        self.vision_model.visual.forward = self.get_image_token_features
+        if "ViT" in self.vision_encoder:
+            self.vision_model.visual.forward = self.get_image_token_features
+        else:
+            self.projection = nn.Linear(2560, 512) # Use RNx4
+            self.vision_model.visual.forward = self.get_resnet_features
+
 
         self.tokenizer = T5Tokenizer.from_pretrained(self.T5_version)
         self.tokenizer.add_tokens(["[itk]"])
@@ -153,6 +158,26 @@ class T5VisionModel(nn.Module):
         # take features from the eot embedding (eot_token is the highest number in each sequence)
         x = x @ self.vision_model.text_projection
 
+    def get_resnet_features(self, x):
+        def stem(x):
+            x = self.vision_model.visual.relu1(self.vision_model.visual.bn1(self.vision_model.visual.conv1(x)))
+            x = self.vision_model.visual.relu2(self.vision_model.visual.bn2(self.vision_model.visual.conv2(x)))
+            x = self.vision_model.visual.relu3(self.vision_model.visual.bn3(self.vision_model.visual.conv3(x)))
+            x = self.vision_model.visual.avgpool(x)
+            return x
+
+        x = x.type(self.vision_model.visual.conv1.weight.dtype)
+        x = stem(x)
+        x = self.vision_model.visual.layer1(x)
+        x = self.vision_model.visual.layer2(x)
+        x = self.vision_model.visual.layer3(x)
+        x = self.vision_model.visual.layer4(x)
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, 3072, 49]
+        x = x.permute(0, 2, 1)  # shape = [*, 49, 3072]
+        x = self.projection(x)
+        # x = self.attnpool(x)
+
+        return x
 
     # Returns [batch_sz, grid ** 2 + 1, hidden_dim]
     def get_image_token_features(self, x):
@@ -210,19 +235,16 @@ class T5VisionModel(nn.Module):
 
         question_embedding = self.T5_model.shared(encoding["input_ids"].to(self.device))
         #question_embedding = question_embedding / question_embedding.norm(dim=1, keepdim=True)
-
-
         
 
         image_attn_mask = torch.ones((image_embeddings.shape[0], image_embeddings.shape[1]))
-        #print(image_attn_mask, encoding.attention_mask)
-        #print(image_attn_mask.shape, encoding.attention_mask.shape)
         attention_mask = torch.cat((image_attn_mask, encoding.attention_mask), axis=1).to(self.device)
-        #print(attention_mask.shape)
-        if self.use_image_info:
+        
+        if self.use_image_info: # Use image information
             combined_embedding = torch.cat((image_embeddings, question_embedding), axis=1).to(self.device)
-        else:
+        else: # Only use question
             combined_embedding = question_embedding.to(self.device)
+            attention_mask = encoding.attention_mask.to(self.device)
 
         
         return combined_embedding, attention_mask, encoding

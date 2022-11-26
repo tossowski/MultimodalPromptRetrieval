@@ -1,6 +1,7 @@
 import pandas as pd
 import torch
 import os
+import random
 from VQAFeatureDataset import VQADataset
 
 qtype_map = {
@@ -26,7 +27,20 @@ qtype_map = {
 class VQARADFeatureDataset(VQADataset):
     def __init__(self, name, dataroot, device = "cuda" if torch.cuda.is_available() else "cpu"):
         super(VQARADFeatureDataset, self).__init__(name , dataroot, device)
-        
+
+    def get_stratified_split(self, split_fraction = 0.2, seed=88):
+        indices = []
+        random.seed(seed)
+        category_to_index = {}
+        for i, entry in enumerate(self.entries):
+            if entry["task"] not in category_to_index:
+                category_to_index[entry["task"]] = []
+            category_to_index[entry["task"]] += [i]     
+
+        # Sample according to split fraction
+        for category in category_to_index:
+            indices.extend(random.sample(category_to_index[category], int(len(category_to_index[category]) * split_fraction)))
+        return indices
 
     def _load_dataset(sself, dataroot, name):
 
@@ -43,6 +57,11 @@ class VQARADFeatureDataset(VQADataset):
                     'answer' : str(entry['answer']).lower(),
                     'task': qtype_map[qtype],
                     'question_type': entry['answer_type'].lower()}
+
+                # Some typos in dataset:
+                if sample['question_type'] == 'closed ':
+                    sample['question_type'] = 'closed'
+                
                 entries.append(sample)
 
         

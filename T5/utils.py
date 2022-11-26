@@ -41,6 +41,9 @@ def get_model_prefix(CFG):
     if "retrieval" in CFG and CFG["retrieval"]:
         MODEL_PREFIX += "_retrieval"
 
+    if "RN" in CFG["vision_encoder"]:
+        MODEL_PREFIX += "resnet"
+
     return MODEL_PREFIX
 
 def cosine_similarity(x1, x2, dim=1, eps=1e-8):

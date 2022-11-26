@@ -15,12 +15,14 @@ import argparse
 import warnings
 import json
 import os
+import random
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--train", help="train a model", action="store_true")
+parser.add_argument("--resume", help="Resume model training", action="store_true")
 parser.add_argument("--test", help="test a model", action="store_true")
 parser.add_argument("--eval", help="test a model", action="store_true")
 parser.add_argument("--config", help="Config file")
@@ -28,7 +30,14 @@ parser.add_argument("--model_file", help="path to model to save/load")
 parser.add_argument("--qid", help="Question ID to analyze")
 args = parser.parse_args()
 
+
+
 CFG = json.load(open(os.path.join("config", args.config)))
+random.seed(CFG["seed"])
+torch.manual_seed(CFG["seed"])
+torch.cuda.manual_seed(CFG["seed"])
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = True
 
 data_name = CFG["dataset"]
 use_image_info = bool(CFG["use_image_info"])
@@ -58,13 +67,20 @@ if data_name == "VQA_RAD":
 
     # dataset_train = torch.utils.data.Subset(dataset_train, train_split)
     # dataset_validate = torch.utils.data.Subset(dataset_train, validate_split)
-    
+    length = len(dataset_train)
     dataset_validate = VQARADFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device) 
-    #dataset_validate.entries = dataset_validate.entries[0:len(dataset_train) // 8]
-    #dataset_train.entries = dataset_train.entries[len(dataset_train) // 8:]
+    
+    #random_split = random.sample(list(range(len(dataset_train))), len(dataset_train) // 10)
+    #random_split = dataset_validate.get_stratified_split(0.15, CFG["seed"])
+
+    #dataset_validate.entries = [dataset_train.entries[i] for i in range(length) if i in random_split]
+    #dataset_train.entries = [dataset_train.entries[i] for i in range(length) if i not in random_split]
+    #print(dataset_validate)
+    #print(dataset_train)
     #dataset_validate = VQARADFeatureDataset("test", os.path.join(CFG["datafolder"],data_name), device=device) 
     
     dataset_test = VQARADFeatureDataset("test", os.path.join(CFG["datafolder"],data_name), device=device)
+    print(dataset_test)
 elif data_name == "SLAKE":
     dataset_train = VQASLAKEFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device)
     dataset_validate = VQASLAKEFeatureDataset("validate", os.path.join(CFG["datafolder"],data_name), device=device)
@@ -107,8 +123,10 @@ validate_loader = DataLoader(dataset_validate, CFG["hyperparameters"]["batch_siz
 test_loader = DataLoader(dataset_test, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
 
 if "retrieval" in CFG and CFG["retrieval"]:
-    print("should retrieve")
-    dataset_train.create_retrieval_dataset(train_loader, MODEL_PREFIX)
+    if "use_additional_retrieval_data" in CFG and CFG["use_additional_retrieval_data"]:
+        dataset_train.create_retrieval_dataset(train_loader, MODEL_PREFIX, use_additional_data=True)
+    else:
+        dataset_train.create_retrieval_dataset(train_loader, MODEL_PREFIX)
     retrieval_function = dataset_train.retrieve_closest_qa_pairs
 else:
     retrieval_function = None
@@ -134,12 +152,23 @@ learning_rate = CFG["hyperparameters"]["learning_rate"]
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
 
-if args.train:
+if args.train or args.resume:
+    if args.resume:
+        checkpoint = torch.load(MODEL_SAVE_PATH, map_location=torch.device(device))
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     best_valid_loss = float("inf")
     best_epoch = 0
+    longest_no_improvement_streak = 0
+    train_info_path = os.path.join("logs", MODEL_PREFIX)
+    os.makedirs(train_info_path, exist_ok=True)
+    train_losses = []
+    valid_losses = []
+    parameter_updates = 0
     for epoch in range(CFG["hyperparameters"]["epochs"]):
         model.train()
         print(f"Starting epoch {epoch} ...")
+        print(f"The learning rate is now {optimizer.param_groups[0]['lr']}")
         train_total = 0
         train_batch = 0
         total_ans = 0
@@ -155,6 +184,7 @@ if args.train:
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            parameter_updates += 1
             train_total += loss.item() * batch["image"].shape[0]
         if CFG["use_prediction_head"]:
             print(f"Train acc is: {total_correct_ans / total_ans}")
@@ -162,7 +192,7 @@ if args.train:
             print(f"Train loss is {train_total / len(train_loader.dataset)}")
         valid_loss = get_validation_loss(model, validate_loader)
         scheduler.step(valid_loss)
-
+        
         
         print(f"Validation Loss: {valid_loss} | Best Validation Loss: {best_valid_loss} at epoch {best_epoch}")
         if valid_loss < best_valid_loss:
@@ -172,6 +202,27 @@ if args.train:
                     'optimizer_state_dict': optimizer.state_dict()}, MODEL_SAVE_PATH)
             best_valid_loss = valid_loss
             best_epoch = epoch
+            longest_no_improvement_streak = 0
+        else:
+            longest_no_improvement_streak += 1
+
+        train_losses.append((parameter_updates, train_total / len(train_loader.dataset)))
+        valid_losses.append((parameter_updates, valid_loss))
+
+        #if longest_no_improvement_streak > 20:
+        #    print(f"Loss didn't improve for {longest_no_improvement_streak} epochs. Stopping training ...")
+        #    break
+
+    print(f"Writing training info to {train_info_path}")
+    with open(os.path.join(train_info_path, "training_loss.txt"), "w") as f:
+        f.write("parameter_updates,loss\n")
+        for i in range(len(train_losses)):
+            f.write(f"{train_losses[i][0]},{train_losses[i][1]}\n")
+    
+    with open(os.path.join(train_info_path, "validation_loss.txt"), "w") as f:
+        f.write("parameter_updates,loss\n")
+        for i in range(len(valid_losses)):
+            f.write(f"{valid_losses[i][0]},{valid_losses[i][1]}\n")
 
 # Test
 if args.test:
@@ -191,46 +242,43 @@ if args.test:
     closed_total = 0
 
     string_match_correct = 0
+    
+    pred_in_retrieval = 0
+    ground_truth_in_retrieval = 0
+    ground_truth_consistency = []
+    consistencies = [] # For retrieval evaluation
 
     incorrect_ids = []
     correct_ids = []
-
-    # encoding = model.tokenizer(
-    #     ["Answer the KG question: What is the function of the bladder? Based on the image: [itk]"],
-    #     padding="longest",
-    #     max_length=model.max_source_length,
-    #     truncation=True,
-    #     return_tensors="pt",
-    #     )
-
-    # question_embedding = model.T5_model.shared(encoding["input_ids"].to(device)) 
-    # attention_mask = encoding.attention_mask.to(device)
-    # output_sequences = model.T5_model.generate(
-    #     inputs_embeds = question_embedding,
-    #     attention_mask=attention_mask,
-    #     do_sample=False,  # disable sampling to test if batching affects output
-    #     max_new_tokens=20
-    #     )
-
-    # predicted_answers = model.tokenizer.batch_decode(output_sequences, skip_special_tokens=True)
-    # print(predicted_answers)
     
     for batch in tqdm(test_loader):
         predicted_answers = model.predict(batch)
+
+        if "retrieval" in CFG and CFG["retrieval"] and not CFG["use_prediction_head"]:
+            retrieved_answers = train_loader.dataset.retrieve_closest_qa_pairs(batch, return_ans=True)
+            for i, pred_answer in enumerate(predicted_answers):
+                consistencies.append(sum([1 for x in retrieved_answers[i] if x == pred_answer.lower()])/len(retrieved_answers[i]))
+                ground_truth_consistency.append(sum([1 for x in retrieved_answers[i] if x == batch["answer"][i].lower()])/len(retrieved_answers[i]))
+
+                if batch["answer"][i].lower() in retrieved_answers[i]:
+                    ground_truth_in_retrieval += 1
+                if pred_answer.lower() in retrieved_answers[i]:
+                    pred_in_retrieval += 1
         
         for i in range(len(predicted_answers)):
             #print(test_loader.dataset.get_closest_label(batch["answer"][i].lower()), batch["label"][i], batch["answer"][i].lower(), predicted_answers[i].lower())
+            string_matched = False
             if not CFG["use_prediction_head"]:
                 if test_loader.dataset.get_closest_label(predicted_answers[i].lower()) == batch["label"][i].item():
                     string_match_correct += 1
                     if predicted_answers[i].lower() != batch["answer"][i].lower():
-                        print(predicted_answers[i].lower(), batch["answer"][i].lower())
+                        string_matched = True
                 #print(string_match_correct)
             
             if CFG["use_prediction_head"]:
                 is_correct = predicted_answers[i] == batch["label"][i]
             else:
-                is_correct = predicted_answers[i].lower() == batch["answer"][i].lower()
+                is_correct = predicted_answers[i].lower() == batch["answer"][i].lower() or string_matched
             
             if is_correct:
                 #print(f'{batch["question"][i]} ||| {predicted_answers[i]} ||| {batch["answer"][i]}')
@@ -263,6 +311,12 @@ if args.test:
 
     if not CFG["use_prediction_head"]:
         print(f"String match correct: {string_match_correct / sum(total.values()):.3f}")
+    
+    if "retrieval" in CFG and CFG["retrieval"] and not CFG["use_prediction_head"]:
+        print(f"Retrieval Prediction Consistency: {sum(consistencies)/ len(consistencies):.3f}")
+        print(f"Retrieval Ground Truth Consistency: {sum(ground_truth_consistency)/ len(ground_truth_consistency):.3f}")
+        print(f"Retrieval Prediction Upper Bound: {pred_in_retrieval / len(consistencies):.3f}")
+        print(f"Retrieval Ground Truth Upper Bound: {ground_truth_in_retrieval / len(consistencies):.3f}")
         #print([batch['answer'][i] + "|||" + predicted_answers[i] for i in range(len(predicted_answers))])
     os.makedirs("logs", exist_ok=True)
     with open(os.path.join("logs", "incorrect_ids.txt"), "w") as f:

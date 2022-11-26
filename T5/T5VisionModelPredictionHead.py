@@ -73,6 +73,6 @@ class T5VisionModelPredictionHead(T5VisionModel):
         logits = self.prediction_head(dropped)
         #probs = logits.softmax(dim = 1)
         #print(batch['labels'])
-        return self.loss_fn(logits, batch['labels'].to(self.device))
+        return self.loss_fn(logits, batch['label'].to(self.device))
         
 

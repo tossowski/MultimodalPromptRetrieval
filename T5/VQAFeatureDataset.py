@@ -63,13 +63,17 @@ class VQADataset(Dataset):
 
         entries = []
         for entry in samples:
-
+            
+                
             sample = {'image_name' : entry['img_name'],
                 'question_id': str(entry['qid']),
                 'question': entry['question'].lower(),
                 'answer' : entry['answer'].lower(),
                 'task': entry['content_type'],
                 'question_type': entry['answer_type'].lower()}
+
+            if sample['question_type'] == 'closed ':
+                sample['question_type'] = 'closed'
 
             if entry['answer'] == '':
                 continue
@@ -110,9 +114,10 @@ class VQADataset(Dataset):
             if self.entries[i]["question_id"] == qid:
                 return self.__getitem__(i)
 
-    def create_retrieval_dataset(self, data_loader, prefix):
+    def create_retrieval_dataset(self, data_loader, prefix, use_additional_data=False):
         embedding_path = os.path.join("cache", prefix, self.__class__.__name__, "embedding.pt")
         answer_path = os.path.join("cache", prefix, self.__class__.__name__, "answers.pkl")
+
         if os.path.exists(embedding_path) and os.path.exists(answer_path):
             
             self.retrieval_embeddings = torch.load(embedding_path, map_location=torch.device(self.device)).float()
@@ -132,24 +137,38 @@ class VQADataset(Dataset):
                 all_embeddings.append(torch.cat([image_encoding,text_encoding], axis=1).detach())
                 all_answers.extend(answers)
 
-            
-            #answers = torch.cat(answers, axis = 0)
-            self.retrieval_embeddings = torch.cat(all_embeddings, axis=0)
+            self.retrieval_embeddings = torch.cat(all_embeddings, axis=0).float()
             self.retrieval_answers = all_answers
+
             torch.save(self.retrieval_embeddings, embedding_path)
             with open(answer_path, 'wb') as f:
                 pickle.dump(all_answers, f)
 
-    def retrieve_closest_qa_pairs(self, batch):
+        if use_additional_data:
+            roco_feat_path = os.path.join("synthetic_data", "cache", "ROCOFeatureDataset", "embedding.pt")
+            roco_ans_path = os.path.join("synthetic_data", "cache", "ROCOFeatureDataset", "answers.pkl")
+            roco_feats = torch.load(roco_feat_path, map_location=torch.device(self.device)).float()
+            with open(roco_ans_path, 'rb') as f:
+                roco_ans = pickle.load(f)
+            self.retrieval_embeddings = torch.cat((self.retrieval_embeddings, roco_feats), axis=0)
+            self.retrieval_answers.extend(roco_ans)
+
+
+        print(f"Retrieval features shape: {self.retrieval_embeddings.shape}")
+        print(f"Number of answers: {len(self.retrieval_answers)}")
+
+    def retrieve_closest_qa_pairs(self, batch, return_ans = False):
         buckets = ["very unlikely", "unlikely", "maybe", "likely", "very likely", "certainly"]
         image_encoding = self.clip_model.encode_image(batch["image"].to(self.device))
         text_encoding = self.clip_model.encode_text(clip.tokenize(batch["question"]).to(self.device))
-        combined = torch.cat([image_encoding,text_encoding], axis=1)
-        dist_matrix = torch.cdist(combined, self.retrieval_embeddings)
+        combined = torch.cat([image_encoding, text_encoding], axis=1)
+        dist_matrix = torch.cdist(combined.float(), self.retrieval_embeddings)
         top15_closest_indices = torch.argsort(dist_matrix, axis = 1)[:,1:16]
+        #print(top15_closest_indices)
         answers = [[self.retrieval_answers[x] for x in top15_closest_indices[i,:]] for i in range(len(top15_closest_indices))]
+        #print(list(zip(answers, top15_closest_indices)))
         prompts = []
-        for row in answers:
+        for i, row in enumerate(answers):
             answer_counts = {}
             for answer in row:
                 if answer not in answer_counts:
@@ -157,10 +176,33 @@ class VQADataset(Dataset):
                 answer_counts[answer] += 1
             pred_answer = max(answer_counts, key = answer_counts.get)
             certainty = max(answer_counts.values())/sum(answer_counts.values())
+            
+                
             prompt = buckets[int(certainty * (len(buckets) - 1))]
             prompts.append(f"I believe the answer is {prompt} {pred_answer}")
+
+        if return_ans:
+            return answers
         return prompts
 
+
+    def __str__(self):
+        q_types = {}
+        q_categories = {}
+        for entry in self.entries:
+            q_type = entry['question_type']
+            q_cat = entry['task']
+            if q_type not in q_types:
+                q_types[q_type] = 0
+            if q_cat not in q_categories:
+                q_categories[q_cat] = 0
+            q_types[q_type] += 1
+            q_categories[q_cat] += 1
+        
+        return_str = ""
+        return_str += f"Question types: {str(q_types)}\n"
+        return_str += f"Question categories: {str(q_categories)}\n"
+        return return_str
 
 
     def __len__(self):

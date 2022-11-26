@@ -101,21 +101,15 @@ class T5VisionModelPredictionHeadBAN(T5VisionModel):
 
         
         output = self.T5_model(inputs_embeds = question_embedding, attention_mask=attention_mask, labels=labels)
-        #print(output['encoder_last_hidden_state'].shape)
         question_features = output['encoder_last_hidden_state']
         image_features = image_embeddings 
         attn, _ = self.BAN_att(image_features, question_features)
-        #print(image_features.shape, question_features.shape, attn.shape)
-        #print(torch.max(attn[0,0,:,:]), torch.min(attn[0,0,:,:]))
-        #fig = plt.figure()
-        #plt.imshow(attn[0,0,:,:].detach().cpu().numpy())
-        #plt.savefig(f"figures/{batch['question_id'][0]}.png")
+
         resnet_output = self.BAN_resnet(image_features,question_features,attn)
         dropped = self.prediction_dropout(resnet_output)
         logits = self.prediction_head(dropped)
         predictions = torch.argmax(logits, dim = 1)
-        #probs = logits.softmax(dim = 1)
-        #print(batch['labels'])
+
         return predictions
 
 
@@ -141,28 +135,6 @@ class T5VisionModelPredictionHeadBAN(T5VisionModel):
         question_embedding = question_embedding / norm
         norm = image_embeddings.pow(2).sum(keepdim=True, dim=2).sqrt()
         image_embeddings = image_embeddings / norm
-        # PCA CODE
-
-        # data = combined_embedding.detach().cpu().numpy()[0]
-
-        # scaler = StandardScaler()
-        # scaler.fit(data)
-        # data=scaler.transform(data)    
-        # labels = np.zeros(data.shape[0])
-        # labels[-51:-1] = 1
-
-        # pca = PCA()
-        # x_new = pca.fit_transform(data)
-        # my_colors = np.where(labels == 1, "red", "blue")
-        # fig = plt.figure()
-        # plt.scatter(x_new[:,0], x_new[:,1],color=my_colors)
-        # plt.savefig(f"pca_{batch['question_id'][0]}.png")
-
-        # test = combined_embedding.detach().cpu().numpy()
-        # fig, ax = plt.subplots(1, len(test[0]), figsize=(200,10))
-        # for i in range(len(test[0])):
-        #     ax[i].hist(test[0][i])
-        # plt.savefig("test.png")
         
         return question_embedding, image_embeddings, attention_mask, encoding
     def forward(self, batch):
@@ -188,6 +160,6 @@ class T5VisionModelPredictionHeadBAN(T5VisionModel):
         resnet_output = self.BAN_resnet(image_features,question_features,attn)
         dropped = self.prediction_dropout(resnet_output)
         logits = self.prediction_head(dropped)
-        return self.loss_fn(logits, batch['labels'].to(self.device))
+        return self.loss_fn(logits, batch['label'].to(self.device))
         
 
