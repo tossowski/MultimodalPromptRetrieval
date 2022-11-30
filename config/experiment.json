@@ -1,0 +1,24 @@
+{
+    "seed": 88,
+    "max_source_length" : 512,
+    "max_target_length" : 128,
+    "dataset": "SLAKE",
+    "datafolder": "/data/ossowski",
+    "use_image_info": 1,
+    "T5_version": "t5-small",
+    "vision_encoder": "ViT-B/32",
+    "vision_checkpoint": "models/PubMedCLIP_ViT32.pth",
+    "use_BAN": 0,
+    "use_prediction_head": 0,
+    "freeze": 0,
+    "glimpse": 10,
+    "retrieval": 0,
+    "use_additional_retrieval_data": 0,
+    "transfer_dataset": "SLAKE",
+    "k": 15,
+    "hyperparameters": {
+        "epochs": 200,
+        "learning_rate": 0.0001,
+        "batch_size": 16
+    }
+}
