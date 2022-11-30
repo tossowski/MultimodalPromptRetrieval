@@ -24,9 +24,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--train", help="train a model", action="store_true")
 parser.add_argument("--resume", help="Resume model training", action="store_true")
 parser.add_argument("--test", help="test a model", action="store_true")
-parser.add_argument("--eval", help="test a model", action="store_true")
-parser.add_argument("--config", help="Config file")
-parser.add_argument("--model_file", help="path to model to save/load")
+parser.add_argument("--eval", help="evaluate a model", action="store_true")
+parser.add_argument("--config", help="config file name in the config folder")
+parser.add_argument("--model_file", help="optional path to model to save/load")
 parser.add_argument("--qid", help="Question ID to analyze")
 args = parser.parse_args()
 
@@ -57,7 +57,11 @@ max_source_length = CFG["max_source_length"]
 max_target_length = CFG["max_target_length"]
 
 torch.manual_seed(CFG["seed"])
-data_name="VQA_RAD"
+
+if "transfer_dataset" in CFG:
+    print(f"Evaluating on transfer dataset {CFG['transfer_dataset']}")
+    data_name = CFG["transfer_dataset"]
+
 if data_name == "VQA_RAD":
     dataset_train = VQARADFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device) 
     # VQA_RAD doesn't have validation data, so use subset of train to estimate
@@ -80,7 +84,6 @@ if data_name == "VQA_RAD":
     #dataset_validate = VQARADFeatureDataset("test", os.path.join(CFG["datafolder"],data_name), device=device) 
     
     dataset_test = VQARADFeatureDataset("test", os.path.join(CFG["datafolder"],data_name), device=device)
-    print(dataset_test)
 elif data_name == "SLAKE":
     dataset_train = VQASLAKEFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device)
     dataset_validate = VQASLAKEFeatureDataset("validate", os.path.join(CFG["datafolder"],data_name), device=device)
@@ -96,7 +99,7 @@ if "max_answers" in CFG and CFG["max_answers"]:
     dataset_test.filter_max_answers(CFG["max_answers"], answer_set)
     
 
-
+# For prediction head models
 label2ans, ans2label = create_ans2label(dataset_train, dataset_validate, dataset_test)    
 dataset_train.add_labels(ans2label)
 dataset_validate.add_labels(ans2label)
@@ -116,17 +119,20 @@ if CFG["fewshot_training_tasks"]["enabled"]:
 print(f"Train data has {len(dataset_train)} examples\nValidation data has {len(dataset_validate)} examples\nTest data has {len(dataset_test)} examples")
 
 train_loader = DataLoader(dataset_train, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
-
 validate_loader = DataLoader(dataset_validate, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
-#validate_loader = DataLoader(dataset_validate, 1, shuffle=True, num_workers=2)
-
 test_loader = DataLoader(dataset_test, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
 
 if "retrieval" in CFG and CFG["retrieval"]:
-    if "use_additional_retrieval_data" in CFG and CFG["use_additional_retrieval_data"]:
-        dataset_train.create_retrieval_dataset(train_loader, MODEL_PREFIX, use_additional_data=True)
+    if "k" in CFG:
+        k = CFG["k"]
     else:
-        dataset_train.create_retrieval_dataset(train_loader, MODEL_PREFIX)
+        k = 15
+    if "use_additional_retrieval_data" in CFG and CFG["use_additional_retrieval_data"]:
+        print(f"Using {k}-nn retrieval with additional synthetic data ...")
+        dataset_train.create_retrieval_dataset(train_loader, MODEL_PREFIX, is_training_phase=args.train, retrieval_k=k, use_additional_data=True)
+    else:
+        print(f"Using {k}-nn retrieval with only training data ...")
+        dataset_train.create_retrieval_dataset(train_loader, MODEL_PREFIX, is_training_phase=args.train, retrieval_k=k)
     retrieval_function = dataset_train.retrieve_closest_qa_pairs
 else:
     retrieval_function = None
@@ -209,9 +215,9 @@ if args.train or args.resume:
         train_losses.append((parameter_updates, train_total / len(train_loader.dataset)))
         valid_losses.append((parameter_updates, valid_loss))
 
-        #if longest_no_improvement_streak > 20:
-        #    print(f"Loss didn't improve for {longest_no_improvement_streak} epochs. Stopping training ...")
-        #    break
+        if longest_no_improvement_streak > 30:
+           print(f"Loss didn't improve for {longest_no_improvement_streak - 1} epochs. Stopping training ...")
+           break
 
     print(f"Writing training info to {train_info_path}")
     with open(os.path.join(train_info_path, "training_loss.txt"), "w") as f:
@@ -243,10 +249,14 @@ if args.test:
 
     string_match_correct = 0
     
+    # For retrieval evaluation
     pred_in_retrieval = 0
     ground_truth_in_retrieval = 0
+    full_retrieval_reliance_pred = 0
+    full_retrieval_reliance_gt = 0
     ground_truth_consistency = []
-    consistencies = [] # For retrieval evaluation
+    consistencies = [] 
+    question_type_consistencies = []
 
     incorrect_ids = []
     correct_ids = []
@@ -255,17 +265,39 @@ if args.test:
         predicted_answers = model.predict(batch)
 
         if "retrieval" in CFG and CFG["retrieval"] and not CFG["use_prediction_head"]:
-            retrieved_answers = train_loader.dataset.retrieve_closest_qa_pairs(batch, return_ans=True)
-            for i, pred_answer in enumerate(predicted_answers):
-                consistencies.append(sum([1 for x in retrieved_answers[i] if x == pred_answer.lower()])/len(retrieved_answers[i]))
-                ground_truth_consistency.append(sum([1 for x in retrieved_answers[i] if x == batch["answer"][i].lower()])/len(retrieved_answers[i]))
 
+            retrieved_answers = train_loader.dataset.retrieve_closest_qa_pairs(batch, return_ans=True)
+            # for i in range(len(retrieved_answers)):
+            #     if retrieved_answers[i][0] != predicted_answers[i]:
+            #         print(f"{retrieved_answers[i][0]} || {predicted_answers[i]} || {batch['answer'][i]}")
+            # print(f"Retrieved answers: {retrieved_answers}")
+            # print(f"Predicted answers: {predicted_answers}")
+            # print(f"Ground Truth answers: {batch['answer']}")
+            retrieved_answer_types = train_loader.dataset.retrieve_closest_qa_pairs(batch, return_ans_types=True)
+
+            for i, pred_answer in enumerate(predicted_answers):
+                
+                
+                answer_type = batch["question_type"][i]
+                consistencies.append(sum([1 for x in retrieved_answers[i] if x == pred_answer.lower()]) / len(retrieved_answers[i]))
+                ground_truth_consistency.append(sum([1 for x in retrieved_answers[i] if x == batch["answer"][i].lower()]) / len(retrieved_answers[i]))
+                question_type_consistencies.append(sum([1 for x in retrieved_answer_types[i] if x == answer_type]) / len(retrieved_answer_types[i]))
+
+
+                #print(retrieved_answers[i], max(set(retrieved_answers[i]), key=retrieved_answers[i].count), batch["answer"][i])
                 if batch["answer"][i].lower() in retrieved_answers[i]:
                     ground_truth_in_retrieval += 1
                 if pred_answer.lower() in retrieved_answers[i]:
                     pred_in_retrieval += 1
+                if batch["answer"][i].lower() == max(set(retrieved_answers[i]), key=retrieved_answers[i].count):
+                    full_retrieval_reliance_gt += 1
+                if pred_answer.lower() == max(set(retrieved_answers[i]), key=retrieved_answers[i].count):
+                    full_retrieval_reliance_pred += 1
         
         for i in range(len(predicted_answers)):
+            if batch["task"][i] == "KG":
+                print(f'{batch["question"][i]}|||{predicted_answers[i].lower()} ||| {batch["answer"][i]}')
+
             #print(test_loader.dataset.get_closest_label(batch["answer"][i].lower()), batch["label"][i], batch["answer"][i].lower(), predicted_answers[i].lower())
             string_matched = False
             if not CFG["use_prediction_head"]:
@@ -281,7 +313,6 @@ if args.test:
                 is_correct = predicted_answers[i].lower() == batch["answer"][i].lower() or string_matched
             
             if is_correct:
-                #print(f'{batch["question"][i]} ||| {predicted_answers[i]} ||| {batch["answer"][i]}')
                 correct_ids.append(batch["question_id"][i])
                 correct[batch["task"][i]] += 1
                 if batch["question_type"][i] == "open":
@@ -293,7 +324,6 @@ if args.test:
 
             total[batch["task"][i]] += 1
             if batch["question_type"][i] == "open":
-                #print(batch["question"][i], label2ans[predicted_answers[i].item()])
                 open_total += 1
             else:
                 closed_total += 1
@@ -301,22 +331,26 @@ if args.test:
         performance[key] = correct[key] / total[key]
 
     print("=======QUESTION TYPE PERFORMANCE=======")
-    for key, val in performance.items():
-        print(f"{key}: {val:.3f}")
+    for key in sorted(performance.keys()):
+        val = performance[key]
+        print(f"{key}: {100 * val:.1f}")
     print("=======OPEN VS CLOSED PERFORMANCE======")
-    print(f"Open: {open_correct/open_total:.3f}")
-    print(f"Closed: {closed_correct/closed_total:.3f}")
+    print(f"Open: {100 * open_correct/open_total:.1f}")
+    print(f"Closed: {100 * closed_correct/closed_total:.1f}")
     print("===========OVERALL PERFORMANCE=========")
-    print(f"Overall accuracy: {sum(correct.values())/sum(total.values()):.3f}")
+    print(f"Overall accuracy: {100 * sum(correct.values())/sum(total.values()):.1f}")
 
-    if not CFG["use_prediction_head"]:
-        print(f"String match correct: {string_match_correct / sum(total.values()):.3f}")
-    
+
     if "retrieval" in CFG and CFG["retrieval"] and not CFG["use_prediction_head"]:
-        print(f"Retrieval Prediction Consistency: {sum(consistencies)/ len(consistencies):.3f}")
-        print(f"Retrieval Ground Truth Consistency: {sum(ground_truth_consistency)/ len(ground_truth_consistency):.3f}")
-        print(f"Retrieval Prediction Upper Bound: {pred_in_retrieval / len(consistencies):.3f}")
-        print(f"Retrieval Ground Truth Upper Bound: {ground_truth_in_retrieval / len(consistencies):.3f}")
+        print(f"Percentage of retrieved answers which == model prediction: {100 * sum(consistencies)/ len(consistencies):.1f}")
+        print(f"Percentage of retrieved answers which == ground truth: {100 * sum(ground_truth_consistency)/ len(ground_truth_consistency):.1f}")
+        print(f"Percentage of retrieved answers which have correct answer type: {100 * sum(question_type_consistencies)/ len(question_type_consistencies):.1f}")
+        print(f"How often prediction is contained within set of retreieved answers: {100 * pred_in_retrieval / len(consistencies):.1f}")
+        print(f"How often ground truth is contained within set of retrieved answers: {100 * ground_truth_in_retrieval / len(consistencies):.1f}")
+        print(f"How often ground truth == most common retrieved answer: {100 * full_retrieval_reliance_gt / len(consistencies):.1f}")
+        print(f"How often prediction == most common retrieved answer: {100 * full_retrieval_reliance_pred / len(consistencies):.1f}")
+
+
         #print([batch['answer'][i] + "|||" + predicted_answers[i] for i in range(len(predicted_answers))])
     os.makedirs("logs", exist_ok=True)
     with open(os.path.join("logs", "incorrect_ids.txt"), "w") as f:
@@ -330,7 +364,7 @@ if args.test:
     with open(os.path.join("logs", MODEL_PREFIX + "performance.txt"), "w") as f:
         for key in  sorted(performance.keys()):
             val = performance[key]
-            f.write(f"{val:.4f}\n")
+            f.write(f"{100 * val:.1f}\n")
         f.write(f"Open,{(open_correct/open_total):.4f}\n")
         f.write(f"Closed: {(closed_correct/closed_total):.4f}\n")
         f.write(f"Overall,{(sum(correct.values())/sum(total.values())):.4f}")

@@ -28,6 +28,6 @@ class T5VisionModelFrozen(T5VisionModel):
             if para.requires_grad:
                 trainable_params += np.prod(para.size())
 
-        print(f"Initializing model with {trainable_params} trainable parameters ...")
+        print(f"Freezing T5 model to have {trainable_params} trainable parameters ...")
     
 

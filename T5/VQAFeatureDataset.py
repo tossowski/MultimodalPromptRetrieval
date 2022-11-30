@@ -114,9 +114,13 @@ class VQADataset(Dataset):
             if self.entries[i]["question_id"] == qid:
                 return self.__getitem__(i)
 
-    def create_retrieval_dataset(self, data_loader, prefix, use_additional_data=False):
-        embedding_path = os.path.join("cache", prefix, self.__class__.__name__, "embedding.pt")
-        answer_path = os.path.join("cache", prefix, self.__class__.__name__, "answers.pkl")
+    def create_retrieval_dataset(self, data_loader, prefix, is_training_phase = True, retrieval_k=15, use_additional_data=False):
+        self.is_training_phase = is_training_phase
+        self.retrieval_k = retrieval_k
+
+        embedding_path = os.path.join("cache", self.__class__.__name__, "embedding.pt")
+        answer_type_path = os.path.join("cache", self.__class__.__name__, "answer_types.pkl")
+        answer_path = os.path.join("cache", self.__class__.__name__, "answers.pkl")
 
         if os.path.exists(embedding_path) and os.path.exists(answer_path):
             
@@ -125,47 +129,65 @@ class VQADataset(Dataset):
             with open(answer_path, 'rb') as f:
                 self.retrieval_answers = pickle.load(f)
                 print(f"Loaded cached qa lookup answers from {answer_path} ...")
+            with open(answer_type_path, 'rb') as f:
+                self.retrieval_answer_types = pickle.load(f)
+                print(f"Loaded cached qa lookup answer types from {answer_type_path} ...")
         else:
-            os.makedirs(os.path.join("cache", prefix, self.__class__.__name__), exist_ok=True)
-            print(f"Creating qa pairs in {os.path.join('cache', prefix, self.__class__.__name__)} ...")
+            os.makedirs(os.path.join("cache", self.__class__.__name__), exist_ok=True)
+            print(f"Creating qa pairs in {os.path.join('cache', self.__class__.__name__)} ...")
             all_embeddings = []
             all_answers = []
+            all_answer_types = []
             for batch in tqdm(data_loader):
                 image_encoding = self.clip_model.encode_image(batch["image"].to(self.device))
                 text_encoding = self.clip_model.encode_text(clip.tokenize(batch["question"]).to(self.device))
                 answers = batch["answer"]
+                all_answer_types.extend(batch["question_type"])
                 all_embeddings.append(torch.cat([image_encoding,text_encoding], axis=1).detach())
                 all_answers.extend(answers)
 
             self.retrieval_embeddings = torch.cat(all_embeddings, axis=0).float()
             self.retrieval_answers = all_answers
+            self.retrieval_answer_types = all_answer_types
 
             torch.save(self.retrieval_embeddings, embedding_path)
             with open(answer_path, 'wb') as f:
                 pickle.dump(all_answers, f)
+            with open(answer_type_path, 'wb') as f:
+                pickle.dump(all_answer_types, f)
 
         if use_additional_data:
             roco_feat_path = os.path.join("synthetic_data", "cache", "ROCOFeatureDataset", "embedding.pt")
             roco_ans_path = os.path.join("synthetic_data", "cache", "ROCOFeatureDataset", "answers.pkl")
+            roco_ans_types_path = os.path.join("synthetic_data", "cache", "ROCOFeatureDataset", "answer_types.pkl")
+
             roco_feats = torch.load(roco_feat_path, map_location=torch.device(self.device)).float()
             with open(roco_ans_path, 'rb') as f:
                 roco_ans = pickle.load(f)
+            with open(roco_ans_types_path, 'rb') as f:
+                roco_ans_types = pickle.load(f)
             self.retrieval_embeddings = torch.cat((self.retrieval_embeddings, roco_feats), axis=0)
             self.retrieval_answers.extend(roco_ans)
+            self.retrieval_answer_types.extend(roco_ans_types)
 
 
         print(f"Retrieval features shape: {self.retrieval_embeddings.shape}")
         print(f"Number of answers: {len(self.retrieval_answers)}")
 
-    def retrieve_closest_qa_pairs(self, batch, return_ans = False):
+    def retrieve_closest_qa_pairs(self, batch, return_ans = False, return_ans_types = False):
         buckets = ["very unlikely", "unlikely", "maybe", "likely", "very likely", "certainly"]
         image_encoding = self.clip_model.encode_image(batch["image"].to(self.device))
         text_encoding = self.clip_model.encode_text(clip.tokenize(batch["question"]).to(self.device))
         combined = torch.cat([image_encoding, text_encoding], axis=1)
         dist_matrix = torch.cdist(combined.float(), self.retrieval_embeddings)
-        top15_closest_indices = torch.argsort(dist_matrix, axis = 1)[:,1:16]
+
+        if self.is_training_phase: # During training, need to ignore the first match because it is always the correct answer
+            top15_closest_indices = torch.argsort(dist_matrix, axis = 1)[:, 0:self.retrieval_k]
+        else:
+            top15_closest_indices = torch.argsort(dist_matrix, axis = 1)[:, 1:1+self.retrieval_k]
         #print(top15_closest_indices)
         answers = [[self.retrieval_answers[x] for x in top15_closest_indices[i,:]] for i in range(len(top15_closest_indices))]
+        retrieved_answer_types = [[self.retrieval_answer_types[x] for x in top15_closest_indices[i,:]] for i in range(len(top15_closest_indices))]
         #print(list(zip(answers, top15_closest_indices)))
         prompts = []
         for i, row in enumerate(answers):
@@ -180,9 +202,11 @@ class VQADataset(Dataset):
                 
             prompt = buckets[int(certainty * (len(buckets) - 1))]
             prompts.append(f"I believe the answer is {prompt} {pred_answer}")
-
+        #print(prompts)
         if return_ans:
             return answers
+        elif return_ans_types:
+            return retrieved_answer_types
         return prompts
 
 

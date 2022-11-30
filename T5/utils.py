@@ -31,7 +31,7 @@ def get_model_prefix(CFG):
 
     if CFG["use_prediction_head"]:
         if CFG["use_BAN"]:
-            MODEL_PREFIX += "_pred_headBAN"
+            MODEL_PREFIX += "_pred_head_BAN"
         else:
             MODEL_PREFIX += "_pred_head"
 
@@ -42,7 +42,7 @@ def get_model_prefix(CFG):
         MODEL_PREFIX += "_retrieval"
 
     if "RN" in CFG["vision_encoder"]:
-        MODEL_PREFIX += "resnet"
+        MODEL_PREFIX += "_resnet"
 
     return MODEL_PREFIX
 

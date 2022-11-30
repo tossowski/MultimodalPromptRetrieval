@@ -6,6 +6,8 @@ from torch import nn
 from create_mapping import CrossModalMapping
 from utils import cosine_similarity
 from torch.autograd import Variable
+import numpy as np
+
 
 class T5VisionModel(nn.Module):
     def __init__(self, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None, mapping_checkpoint=None, retrieval_function=None):
@@ -20,6 +22,8 @@ class T5VisionModel(nn.Module):
         self.retrieval_function = retrieval_function
         self.use_mapping = bool(mapping_checkpoint)
         self.vision_model, _ = clip.load(self.vision_encoder, device=self.device)
+        self.map_to_large = False
+
         for p in self.vision_model.parameters():
             p.requires_grad = False
 
@@ -40,6 +44,9 @@ class T5VisionModel(nn.Module):
         self.vision_model.visual.old_forward = self.vision_model.visual.forward
         if "ViT" in self.vision_encoder:
             self.vision_model.visual.forward = self.get_image_token_features
+            if 'large' in self.T5_version:
+                self.map_to_large = True
+                self.projection = nn.Linear(512, 1024)
         else:
             self.projection = nn.Linear(2560, 512) # Use RNx4
             self.vision_model.visual.forward = self.get_resnet_features
@@ -51,99 +58,19 @@ class T5VisionModel(nn.Module):
         self.T5_model.resize_token_embeddings(len(self.tokenizer))
         self.image_token_id = self.tokenizer.convert_tokens_to_ids("[itk]")
 
-    def attention_fn(self, query, context, temp1):
-        """
-        query: batch x ndf x queryL
-        context: batch x ndf x ih x iw (sourceL=ihxiw)
-        mask: batch_size x sourceL
-        """
-        batch_size, queryL = query.size(0), query.size(2)
-        ih, iw = context.size(2), context.size(3)
-        sourceL = ih * iw
+        T5_trainable_params = 0
+        vision_model_trainable_params = 0
+        for para in self.T5_model.parameters():
+            if para.requires_grad:
+                T5_trainable_params += np.prod(para.size())
+        for para in self.vision_model.parameters():
+            if para.requires_grad:
+                vision_model_trainable_params += np.prod(para.size())
 
-        # --> batch x sourceL x ndf
-        context = context.view(batch_size, -1, sourceL)
-        contextT = torch.transpose(context, 1, 2).contiguous()
+        print(f"Initializing T5 model with {T5_trainable_params} trainable parameters ...")
+        print(f"Initializing {self.vision_encoder} model with {vision_model_trainable_params} trainable parameters ...")
 
-        # Get attention
-        # (batch x sourceL x ndf)(batch x ndf x queryL)
-        # -->batch x sourceL x queryL
-        attn = torch.bmm(contextT, query)
-        # --> batch*sourceL x queryL
-        attn = attn.view(batch_size * sourceL, queryL)
-        attn = nn.Softmax(dim=-1)(attn)
-
-        # --> batch x sourceL x queryL
-        attn = attn.view(batch_size, sourceL, queryL)
-        # --> batch*queryL x sourceL
-        attn = torch.transpose(attn, 1, 2).contiguous()
-        attn = attn.view(batch_size * queryL, sourceL)
-
-        attn = attn * temp1
-        attn = nn.Softmax(dim=-1)(attn)
-        attn = attn.view(batch_size, queryL, sourceL)
-        # --> batch x sourceL x queryL
-        attnT = torch.transpose(attn, 1, 2).contiguous()
-
-        # (batch x ndf x sourceL)(batch x sourceL x queryL)
-        # --> batch x ndf x queryL
-        weightedContext = torch.bmm(context, attnT)
-
-        return weightedContext, attn.view(batch_size, -1, ih, iw)
-
-    def local_loss(
-        self, words_emb, img_features, cap_lens, temp1=4.0, temp2=5.0, temp3=10.0, agg="sum"):
-
-        batch_size = img_features.shape[0]
-
-        att_maps = []
-        similarities = []
-        # cap_lens = cap_lens.data.tolist()
-        for i in range(words_emb.shape[0]):
-
-            # Get the i-th text description
-            words_num = cap_lens[i]  # 25
-            # TODO: remove [SEP]
-            # word = words_emb[i, :, 1:words_num+1].unsqueeze(0).contiguous()    # [1, 768, 25]
-            word = words_emb[i, :words_num, :].unsqueeze(0).transpose(1,2).contiguous()  # [1, 768, 25]
-            word = word.repeat(batch_size, 1, 1)  # [48, 768, 25]
-            grid_size = int(sqrt(img_features.shape[1]))
-            context = img_features.view(batch_size, img_features.shape[-1], grid_size, grid_size)  # [48, 768, 19, 19]
-                        
-            weiContext, attn = self.attention_fn(
-                word, context, temp1
-            )  # [48, 768, 25], [48, 25, 19, 19]
-
-            att_maps.append(
-                attn[i].unsqueeze(0).contiguous()
-            )  # add attention for curr index  [25, 19, 19]
-            word = word.transpose(1, 2).contiguous()  # [48, 25, 768]
-            weiContext = weiContext.transpose(1, 2).contiguous()  # [48, 25, 768]
-
-            word = word.view(batch_size * words_num, -1)  # [1200, 768]
-            weiContext = weiContext.view(batch_size * words_num, -1)  # [1200, 768]
-
-            row_sim = cosine_similarity(word, weiContext)
-            row_sim = row_sim.view(batch_size, words_num)  # [48, 25]
-
-            row_sim.mul_(temp2).exp_()
-            if agg == "sum":
-                row_sim = row_sim.sum(dim=1, keepdim=True)  # [48, 1]
-            else:
-                row_sim = row_sim.mean(dim=1, keepdim=True)  # [48, 1]
-            row_sim = torch.log(row_sim)
-
-            similarities.append(row_sim)
-
-        similarities = torch.cat(similarities, 1)  #
-        similarities = similarities * temp3
-        similarities1 = similarities.transpose(0, 1)  # [48, 48]
-
-        labels = Variable(torch.LongTensor(range(batch_size))).to(similarities.device)
-
-        loss0 = nn.CrossEntropyLoss()(similarities, labels)  # labels: arange(batch_size)
-        loss1 = nn.CrossEntropyLoss()(similarities1, labels)
-        return loss0, loss1, att_maps
+ 
 
     def get_clip_text_features(self, text):
         x = self.vision_model.token_embedding(text).type(self.vision_model.dtype)  # [batch_size, n_ctx, d_model]
@@ -201,6 +128,8 @@ class T5VisionModel(nn.Module):
             x = x @ self.vision_model.visual.proj
 
         #x = x / x.norm(dim=1, keepdim=True)
+        if self.map_to_large:
+            x = self.projection(x)
 
         if self.use_mapping:
             x = self.mapping.linear_relu_stack(x)
@@ -218,11 +147,6 @@ class T5VisionModel(nn.Module):
         # image_prompts = [" Based on the picture: " for x in batch['task']]
 
         image_embeddings = self.vision_model.visual(batch["image"].to(self.device))
-
-        # image_tokens = "[itk] " * image_embeddings.shape[1]
-        # image_tokens = image_tokens[:-1] # Remove last space
-    
-  
         input_sentences = [task_prefixes[i] + batch['question'][i] + retrieved_info[i] for i in range(len(batch['question']))]
         
         encoding = self.tokenizer(
@@ -236,7 +160,6 @@ class T5VisionModel(nn.Module):
         question_embedding = self.T5_model.shared(encoding["input_ids"].to(self.device))
         #question_embedding = question_embedding / question_embedding.norm(dim=1, keepdim=True)
         
-
         image_attn_mask = torch.ones((image_embeddings.shape[0], image_embeddings.shape[1]))
         attention_mask = torch.cat((image_attn_mask, encoding.attention_mask), axis=1).to(self.device)
         
@@ -279,21 +202,6 @@ class T5VisionModel(nn.Module):
 
         combined_embedding, attention_mask, _ = self.prepare_input(batch)
 
-        # caption_encoding = self.tokenizer(
-        #     batch['question'],
-        #     padding="longest",
-        #     max_length=self.max_source_length,
-        #     truncation=True,
-        #     return_tensors="pt"
-        # )
-
-        #lengths = [sum([1 for entry in caption_encoding["input_ids"][i] if entry != 0]) for i in range(len(caption_encoding["input_ids"]))]
-        #image_embeddings = self.vision_model.visual(batch["image"].to(self.device))
-        #caption_embedding = self.T5_model.shared(caption_encoding["input_ids"].to(self.device))
-        #loss0, loss1, attn_maps = self.local_loss(caption_embedding, image_embeddings[:,1:,:], lengths) # Get everything but CLS token
-        #print(len(attn_maps))
-        #print(attn_maps[0].shape)
-
         target_encoding = self.tokenizer(
         batch['answer'], padding="longest", max_length=self.max_target_length, truncation=True
         )
@@ -305,7 +213,6 @@ class T5VisionModel(nn.Module):
 
 
         loss = self.T5_model(inputs_embeds = combined_embedding, attention_mask=attention_mask, labels=labels).loss
-        #loss = loss
         return loss
         
 
