@@ -4,7 +4,12 @@ This repository includes the source code for T5vision, a model which optionally 
 
 ## How to use
 ### Setup the environment
-TODO: provide instructions
+We use conda version 4.13.0 with python 3.9.12 to conduct our experiments. After creating a fresh anaconda environment, you can install the required libraries to run our code with the following command:
+
+```
+pip install -r requirements.txt
+```
+
 ### Obtain the data
 To reproduce our results, first clone this repository and download the SLAKE dataset from [their website](https://www.med-vqa.com/slake/). Also obtain the image folder, trainset.json, and testset.json files from the data folder at [this github repository](https://github.com/Awenbocc/med-vqa). Once the data has been obtained, organize the data into this directory structure (note, VQA_RAD json files should also be renamed to train.json, test.json):
 
@@ -27,7 +32,29 @@ data
                 ⋮
 ```
 ### Setup the config file
-We provide a sample config file in the config folder. You may edit the various entries within it to customize the experiment.
+We provide a sample config file in the config folder. You may edit the various entries within it to customize the experiment. Here is a brief explanation of important settings:
+```
+
+    "dataset":                       # The source dataset used for training (SLAKE or VQA_RAD)
+    "datafolder":                    # The path to the folder containing the medical VQA datasets
+    "use_image_info":                # 0/1 Indicating whether to use the image features in the prompt
+    "T5_version":                    # The size of the T5 model: "t5-small" works best
+    "vision_encoder":                # The type of CLIP model: "ViT-B/32" works well
+    "vision_checkpoint":             # The path to the saved PubMedCLIP weights
+    "use_BAN":                       # 0/1 indicating whether to use BAN for feature fusion (only for prediction head models)
+    "use_prediction_head":           # 0/1 indicating whether to use a prediction head or generate free-text answers
+    "freeze":                        # 0/1 indicating whether the encoder/decoder stack of T5 should be frozen
+    "glimpse":                       # A hyperparameter for BAN
+    "retrieval":                     # 0/1 indicating whether the model should do retrieval
+    "use_additional_retrieval_data": # 0/1 indicating whether additional synthetic data should be used for retrieval
+    "transfer_dataset":              # The Target dataset (SLAKE or VQA_RAD)
+    "retrieval_dataset":             # Name of the retrieval dataset (SLAKE, VQA_RAD, or ROCO)
+    "k": 1,                          # Number of retrieved question-answer pairs during retrieval
+    "quantifier":                    # 0/1 indicating if a quantifier should be used in the retrieved prompts
+    "further_finetune":              # 0/1 indicating whether model weights should be updated during adaptation
+}
+
+```
 
 ### Run main.py
 To train a model, execute the following command:
@@ -40,6 +67,10 @@ python main.py --test --config <config_file_name>
 ```
 
 ### Advanced Usage
+#### PubMedCLIP Model
+We observed mariginal gains for both in-domain and dataset adaptation tasks when using a domain-specific encoder. To reproduce these results, please follow [these instructions](https://github.com/sarahESL/PubMedCLIP/tree/main/PubMedCLIP) and download the PubMedCLIP_ViT32.pth checkpoint. You may then supply the path to these weights in the config file under the vision_checkpoint argument.
+
+#### Synthetic Data
 To reproduce the experiments with synthetic data, first download the ROCO dataset following [these instructions](https://github.com/razorx89/roco-dataset) . Then run the generate_roco_questions script from the root project folder as follows:
 ```
 python synthetic_data/generate_roco_questions.py <path_to_ROCO_dataset> <path_to_folder_with_SLAKE_and_VQA_RAD_datasets>
