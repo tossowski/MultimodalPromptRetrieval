@@ -1,14 +1,14 @@
-from T5VisionModelPredictionHeadBAN import T5VisionModelPredictionHeadBAN
-from T5VisionModelPredictionHead import T5VisionModelPredictionHead
-from T5VisionModel import T5VisionModel
-from T5VisionModelFrozen import T5VisionModelFrozen
-from SLAKE import VQASLAKEFeatureDataset
-from VQA_RAD import VQARADFeatureDataset
-from ROCO import ROCOFeatureDataset
+from architectures.T5VisionModelPredictionHeadBAN import T5VisionModelPredictionHeadBAN
+from architectures.T5VisionModelPredictionHead import T5VisionModelPredictionHead
+from architectures.T5VisionModel import T5VisionModel
+from architectures.T5VisionModelFrozen import T5VisionModelFrozen
+from dataset.SLAKE import VQASLAKEFeatureDataset
+from dataset.VQA_RAD import VQARADFeatureDataset
+from dataset.ROCO import ROCOFeatureDataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from collections import defaultdict
-from utils import get_validation_loss, visualize_attn_weights, create_ans2label, get_model_prefix
+from utils import get_validation_loss, visualize_attn_weights, create_ans2label, get_model_prefix, load_dataset
 
 import torch
 import argparse
@@ -16,6 +16,8 @@ import warnings
 import json
 import os
 import random
+import numpy as np
+import sys
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
@@ -31,8 +33,7 @@ parser.add_argument("--qid", help="Question ID to analyze")
 args = parser.parse_args()
 
 
-
-CFG = json.load(open(os.path.join("config", args.config)))
+CFG = json.load(open(args.config))
 random.seed(CFG["seed"])
 torch.manual_seed(CFG["seed"])
 torch.cuda.manual_seed(CFG["seed"])
@@ -45,6 +46,7 @@ MODEL_SAVE_FOLDER = "./models"
 
 if args.model_file:
     MODEL_SAVE_PATH = args.model_file
+    MODEL_PREFIX = args.model_file[:-3]
     print(f"Model will be saved/loaded from {MODEL_SAVE_PATH}")
 else:
     MODEL_PREFIX = get_model_prefix(CFG)
@@ -52,107 +54,91 @@ else:
     MODEL_SAVE_PATH = os.path.join(MODEL_SAVE_FOLDER, MODEL_PREFIX + ".pt")
     print(f"Model will be saved/loaded from {MODEL_SAVE_PATH}")
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
 max_source_length = CFG["max_source_length"]
 max_target_length = CFG["max_target_length"]
 
 torch.manual_seed(CFG["seed"])
 
-if "transfer_dataset" in CFG:
+if "transfer_dataset" in CFG and not args.train:
     print(f"Evaluating on transfer dataset {CFG['transfer_dataset']}")
     data_name = CFG["transfer_dataset"]
 
-if data_name == "VQA_RAD":
-    dataset_train = VQARADFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device) 
-    # VQA_RAD doesn't have validation data, so use subset of train to estimate
-    
-    # train_split = list(range(len(dataset_train) // 8, len(dataset_train)))
-    # validate_split = list(range(0, len(dataset_train) // 8))
 
-    # dataset_train = torch.utils.data.Subset(dataset_train, train_split)
-    # dataset_validate = torch.utils.data.Subset(dataset_train, validate_split)
-    length = len(dataset_train)
-    dataset_validate = VQARADFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device) 
-    
-    #random_split = random.sample(list(range(len(dataset_train))), len(dataset_train) // 10)
-    #random_split = dataset_validate.get_stratified_split(0.15, CFG["seed"])
+# Load train, validate, and test sets
+dataset_train = load_dataset(CFG["datafolder"], data_name, "train", device)
 
-    #dataset_validate.entries = [dataset_train.entries[i] for i in range(length) if i in random_split]
-    #dataset_train.entries = [dataset_train.entries[i] for i in range(length) if i not in random_split]
-    #print(dataset_validate)
-    #print(dataset_train)
-    #dataset_validate = VQARADFeatureDataset("test", os.path.join(CFG["datafolder"],data_name), device=device) 
-    
-    dataset_test = VQARADFeatureDataset("test", os.path.join(CFG["datafolder"],data_name), device=device)
-elif data_name == "SLAKE":
-    dataset_train = VQASLAKEFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device)
-    dataset_validate = VQASLAKEFeatureDataset("validate", os.path.join(CFG["datafolder"],data_name), device=device)
-    dataset_test = VQASLAKEFeatureDataset("test", os.path.join(CFG["datafolder"],data_name), device=device)
-elif data_name == "ROCO":
-    dataset_train = ROCOFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device)
-    dataset_validate = ROCOFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device)
-    dataset_test = ROCOFeatureDataset("train", os.path.join(CFG["datafolder"],data_name), device=device)
+if "train_subset" in CFG:
+    split = dataset_train.get_stratified_split(split_fraction=CFG["train_subset"])
+    dataset_train.entries = [dataset_train.entries[x] for x in split]
+
+dataset_validate = load_dataset(CFG["datafolder"], data_name, "validate", device)
+dataset_test = load_dataset(CFG["datafolder"], data_name, "test", device)
 
 if "max_answers" in CFG and CFG["max_answers"]:
     answer_set = dataset_train.filter_max_answers(CFG["max_answers"], config=CFG)
     dataset_validate.filter_max_answers(CFG["max_answers"], answer_set)
     dataset_test.filter_max_answers(CFG["max_answers"], answer_set)
     
-
 # For prediction head models
-label2ans, ans2label = create_ans2label(dataset_train, dataset_validate, dataset_test)    
+label2ans, ans2label = create_ans2label(dataset_train, dataset_validate, dataset_test)
 dataset_train.add_labels(ans2label)
 dataset_validate.add_labels(ans2label)
 dataset_test.add_labels(ans2label)
 
-if "fewshot_training_tasks" in CFG and CFG["fewshot_training_tasks"]["enabled"]:
-    #tasks = list(set([x["task"] for x in dataset_train.entries]))
-    test_tasks = CFG["fewshot_training_tasks"]["test"]
-    training_tasks = CFG["fewshot_training_tasks"]["train"]
-    
-    print(f'Filtering training to only consist of these tasks: {training_tasks}')
-    dataset_train.filter(training_tasks, limit_num_examples = CFG["fewshot_training_tasks"]["limit"])
-    dataset_validate.filter(training_tasks, limit_num_examples = CFG["fewshot_training_tasks"]["limit"])
-    print(f'Filtering test to only consist of these tasks: {test_tasks}')
-    dataset_test.filter(test_tasks, limit_num_examples = CFG["fewshot_training_tasks"]["limit"])
-
-print(f"Train data has {len(dataset_train)} examples\nValidation data has {len(dataset_validate)} examples\nTest data has {len(dataset_test)} examples")
 
 train_loader = DataLoader(dataset_train, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
 validate_loader = DataLoader(dataset_validate, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
 test_loader = DataLoader(dataset_test, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
 
+# Create retrieval sets
 if "retrieval" in CFG and CFG["retrieval"]:
+    if "retrieval_dataset" in CFG:
+        retrieval_dataset = load_dataset(CFG["datafolder"], CFG["retrieval_dataset"], "train", device)
+        if "retrieval_subset" in CFG:
+            split = retrieval_dataset.get_stratified_split(split_fraction=CFG["retrieval_subset"])
+            retrieval_dataset.entries = [retrieval_dataset.entries[x] for x in split]
+        retrieval_loader =  DataLoader(retrieval_dataset, CFG["hyperparameters"]["batch_size"], shuffle=True, num_workers=2)
+    else:
+        retrieval_dataset = dataset_train
+        if "retrieval_subset" in CFG:
+            split = retrieval_dataset.get_stratified_split(split_fraction=CFG["retrieval_subset"])
+            retrieval_dataset.entries = [retrieval_dataset.entries[x] for x in split]
+        retrieval_loader = train_loader
+
     if "k" in CFG:
         k = CFG["k"]
     else:
         k = 15
     if "use_additional_retrieval_data" in CFG and CFG["use_additional_retrieval_data"]:
-        print(f"Using {k}-nn retrieval with additional synthetic data ...")
-        dataset_train.create_retrieval_dataset(train_loader, MODEL_PREFIX, is_training_phase=args.train, retrieval_k=k, use_additional_data=True)
+        print(f"Using {k}-nn retrieval from {retrieval_dataset.dataroot} with additional synthetic data ...")
+        retrieval_dataset.create_retrieval_dataset(retrieval_loader, MODEL_PREFIX, is_training_phase=args.train, retrieval_k=k, use_additional_data=True)
     else:
-        print(f"Using {k}-nn retrieval with only training data ...")
-        dataset_train.create_retrieval_dataset(train_loader, MODEL_PREFIX, is_training_phase=args.train, retrieval_k=k)
-    retrieval_function = dataset_train.retrieve_closest_qa_pairs
+        print(f"Using {k}-nn retrieval from {retrieval_dataset.dataroot} with only training data ...")
+        retrieval_dataset.create_retrieval_dataset(retrieval_loader, MODEL_PREFIX, is_training_phase=args.train, retrieval_k=k)
+    retrieval_function = retrieval_dataset.retrieve_closest_qa_pairs
 else:
     retrieval_function = None
 
+if "quantifier" in CFG and not CFG["quantifier"]:
+    use_quantifier = False
+else:
+    use_quantifier = True
 
 if CFG["use_prediction_head"]:
     if CFG["use_BAN"]:
-        model = T5VisionModelPredictionHeadBAN(len(ans2label), vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, glimpse=CFG["glimpse"], retrieval_function = retrieval_function).to(device)
+        model = T5VisionModelPredictionHeadBAN(len(ans2label), vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, glimpse=CFG["glimpse"], retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)
     else:
         if "max_answers" in CFG and CFG["max_answers"]:
-            model = T5VisionModelPredictionHead(CFG["max_answers"], vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function).to(device)
+            model = T5VisionModelPredictionHead(CFG["max_answers"], vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)
         else:
-            model = T5VisionModelPredictionHead(len(ans2label), vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function).to(device)
+            model = T5VisionModelPredictionHead(len(ans2label), vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)
 
 else:
     if CFG["freeze"]:
-        model = T5VisionModelFrozen(vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function).to(device)   
+        model = T5VisionModelFrozen(vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)   
     else:
-        model = T5VisionModel(vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function).to(device)
-
+        model = T5VisionModel(vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)
 
 
 learning_rate = CFG["hyperparameters"]["learning_rate"]
@@ -164,6 +150,10 @@ if args.train or args.resume:
         checkpoint = torch.load(MODEL_SAVE_PATH, map_location=torch.device(device))
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if "further_finetune" in CFG and CFG["further_finetune"]:
+            MODEL_SAVE_PATH = MODEL_PREFIX + "_msrc_with_retrieval_80.pt"
+            for g in optimizer.param_groups:
+                g['lr'] = CFG["hyperparameters"]["learning_rate"]
     best_valid_loss = float("inf")
     best_epoch = 0
     longest_no_improvement_streak = 0
@@ -233,7 +223,6 @@ if args.train or args.resume:
 
 # Test
 if args.test:
-    #MODEL_SAVE_PATH = "./models/model_SLAKE_with_vision.pt" # For OOD Testing
     checkpoint = torch.load(MODEL_SAVE_PATH, map_location=torch.device(device))
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -261,31 +250,36 @@ if args.test:
 
     incorrect_ids = []
     correct_ids = []
-    
+
+    correct_by_retrieved_dist = {}
+    total_by_retrieved_dist = {}
+
+
     for batch in tqdm(test_loader):
         predicted_answers = model.predict(batch)
 
-        if "retrieval" in CFG and CFG["retrieval"] and not CFG["use_prediction_head"]:
 
-            retrieved_answers = train_loader.dataset.retrieve_closest_qa_pairs(batch, return_ans=True)
-            # for i in range(len(retrieved_answers)):
-            #     if retrieved_answers[i][0] != predicted_answers[i]:
-            #         print(f"{retrieved_answers[i][0]} || {predicted_answers[i]} || {batch['answer'][i]}")
-            # print(f"Retrieved answers: {retrieved_answers}")
-            # print(f"Predicted answers: {predicted_answers}")
-            # print(f"Ground Truth answers: {batch['answer']}")
-            retrieved_answer_types = train_loader.dataset.retrieve_closest_qa_pairs(batch, return_ans_types=True)
+        if "retrieval" in CFG and CFG["retrieval"] and not CFG["use_prediction_head"]:
+            retrieved_answers = retrieval_loader.dataset.retrieve_closest_qa_pairs(batch, return_ans=True)
+            retrieved_answer_types = retrieval_loader.dataset.retrieve_closest_qa_pairs(batch, return_info=["question_type"])
+            retrieved_question_info = retrieval_loader.dataset.retrieve_closest_qa_pairs(batch, return_info=["question", "question_id"])
+            retrieved_dists = retrieval_loader.dataset.retrieve_closest_qa_pairs(batch, return_dists=True)
 
             for i, pred_answer in enumerate(predicted_answers):
-                
                 
                 answer_type = batch["question_type"][i]
                 consistencies.append(sum([1 for x in retrieved_answers[i] if x == pred_answer.lower()]) / len(retrieved_answers[i]))
                 ground_truth_consistency.append(sum([1 for x in retrieved_answers[i] if x == batch["answer"][i].lower()]) / len(retrieved_answers[i]))
                 question_type_consistencies.append(sum([1 for x in retrieved_answer_types[i] if x == answer_type]) / len(retrieved_answer_types[i]))
 
+                most_freq_answer = max(set(retrieved_answers[i]), key=retrieved_answers[i].count)
+                proportion = retrieved_answers[i].count(most_freq_answer) / k
+                total_by_retrieved_dist[proportion] = total_by_retrieved_dist.get(proportion, 0) + 1
 
-                #print(retrieved_answers[i], max(set(retrieved_answers[i]), key=retrieved_answers[i].count), batch["answer"][i])
+
+                if pred_answer.lower() == batch["answer"][i].lower():
+                    correct_by_retrieved_dist[proportion] = correct_by_retrieved_dist.get(proportion, 0) + 1
+
                 if batch["answer"][i].lower() in retrieved_answers[i]:
                     ground_truth_in_retrieval += 1
                 if pred_answer.lower() in retrieved_answers[i]:
@@ -296,17 +290,12 @@ if args.test:
                     full_retrieval_reliance_pred += 1
         
         for i in range(len(predicted_answers)):
-        #     if batch["task"][i] == "KG":
-        #         print(f'{batch["question"][i]}|||{predicted_answers[i].lower()} ||| {batch["answer"][i]}')
-
-            #print(test_loader.dataset.get_closest_label(batch["answer"][i].lower()), batch["label"][i], batch["answer"][i].lower(), predicted_answers[i].lower())
             string_matched = False
             if not CFG["use_prediction_head"]:
                 if test_loader.dataset.get_closest_label(predicted_answers[i].lower()) == batch["label"][i].item():
                     string_match_correct += 1
                     if predicted_answers[i].lower() != batch["answer"][i].lower():
                         string_matched = True
-                #print(string_match_correct)
             
             if CFG["use_prediction_head"]:
                 is_correct = predicted_answers[i] == batch["label"][i]
@@ -332,6 +321,7 @@ if args.test:
         performance[key] = correct[key] / total[key]
 
     print("=======QUESTION TYPE PERFORMANCE=======")
+    
     for key in sorted(performance.keys()):
         val = performance[key]
         print(f"{key}: {100 * val:.1f}")
@@ -351,8 +341,6 @@ if args.test:
         print(f"How often ground truth == most common retrieved answer: {100 * full_retrieval_reliance_gt / len(consistencies):.1f}")
         print(f"How often prediction == most common retrieved answer: {100 * full_retrieval_reliance_pred / len(consistencies):.1f}")
 
-
-        #print([batch['answer'][i] + "|||" + predicted_answers[i] for i in range(len(predicted_answers))])
     os.makedirs("logs", exist_ok=True)
     with open(os.path.join("logs", "incorrect_ids.txt"), "w") as f:
         for qid in incorrect_ids:
@@ -381,11 +369,8 @@ if args.eval:
         
     with open(os.path.join("logs", "correct_ids.txt"), "r") as f:
         for i, line in enumerate(f):
-            qid = line[:-1]
-
-            #if qid == "12098":
+            qid = line
             info = dataset_test.get_question_by_id(qid)
             batch = test_loader.collate_fn([info])
-            if batch["task"][0] == "KG":
-                visualize_attn_weights(model, batch, attn_type = "encoder_attentions")
-                print(f"Finished image {i} out of {num_lines}")
+            visualize_attn_weights(model, batch, attn_type = "cross_attentions", aggregate=True, average_word_pieces=True)
+            print(f"Finished image {i} out of {num_lines}")

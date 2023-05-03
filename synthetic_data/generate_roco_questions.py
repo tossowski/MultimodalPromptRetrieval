@@ -1,19 +1,23 @@
 import os
+import shutil
 import torch
 import pandas as pd
 import sys
 import clip
 import pickle
 
-sys.path.insert(0, os.path.abspath(".."))
+
+sys.path.insert(0, os.path.abspath(os.getcwd()))
 from random import sample
 from tqdm import tqdm
-from ROCO import ROCOFeatureDataset
 from torch.utils.data import DataLoader
 from question_category import QuestionCategoryBucket
 from question_category_specific import SpecificQuestionCategoryBucket
 
 if __name__ == "__main__":
+
+    PATH_TO_ROCO_DATA = sys.argv[1]
+    SAVE_PATH = sys.argv[2] # Should be the same as datafolder in your config
 
     seed = 88
 
@@ -56,12 +60,12 @@ if __name__ == "__main__":
     SHAPE_KEYWORDS = ['irregular', 'oval', 'circular']
     SHAPE_TEMPLATES = ['What is the shape of the {} in this picture?']
 
-    PATH_TO_ROCO_DATA = "/data/ossowski/roco-dataset/data/train/radiology"
+    
 
-    caption_path = os.path.join(PATH_TO_ROCO_DATA, "captions.txt")
-    semtype_path = os.path.join(PATH_TO_ROCO_DATA, "semtypes.txt")
-    keywords_path = os.path.join(PATH_TO_ROCO_DATA, "keywords.txt")
-    images_path = os.path.join(PATH_TO_ROCO_DATA, "images")
+    caption_path = os.path.join(PATH_TO_ROCO_DATA, "roco-dataset", "data", "train", "radiology", "captions.txt")
+    semtype_path = os.path.join(PATH_TO_ROCO_DATA, "roco-dataset", "data", "train", "radiology", "semtypes.txt")
+    keywords_path = os.path.join(PATH_TO_ROCO_DATA, "roco-dataset", "data", "train", "radiology", "keywords.txt")
+    images_path = os.path.join(PATH_TO_ROCO_DATA, "roco-dataset", "data", "train", "radiology", "images")
 
     # Create category buckets
     ORGAN_SYSTEM_OPEN = QuestionCategoryBucket("Organ", ORGAN_SYSTEMS, organ_system_question_open_templates, "open", seed)
@@ -94,6 +98,7 @@ if __name__ == "__main__":
     col_names = ['q_type', 'image_id', 'question', 'answer', 'question_type']
     row_data = []
 
+    answer_counts = {} # key = answer, value = # occurences
     for roco_id in keywords:
         if not os.path.exists(os.path.join(images_path, roco_id + ".jpg")):
             print(f"{os.path.join(images_path, roco_id + '.jpg')} doesn't exist!!! Skipping ...")
@@ -109,58 +114,40 @@ if __name__ == "__main__":
                 for i in range(len(questions)):
                     question = questions[i]
                     answer = answers[i]
+                    num_answer_occurrences = answer_counts.get(answer, 0)
                     row_data.append([q_bucket.q_category, roco_id + ".jpg", question, answer, q_bucket.q_type])
-        #if "gastrointestinal" in keywords[roco_id]:
-        #    print(keywords[roco_id])
+                    answer_counts[answer] = answer_counts.get(answer, 0) + 1
 
-    df = pd.DataFrame(row_data)
-    df.columns = col_names
-    df.to_csv('/data/ossowski/ROCO/train.csv', index=False)
+    def get_stratified_split(rows, split_fraction = 0.2, seed=88):
+        import random
+        indices = []
+        random.seed(seed)
+        category_to_index = {}
+        for index, row in enumerate(rows):
+            if row[0] not in category_to_index:
+                category_to_index[row[0]] = []
+            category_to_index[row[0]] += [index]     
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Sample according to split fraction
+        for category in category_to_index:
+            indices.extend(random.sample(category_to_index[category], int(len(category_to_index[category]) * split_fraction)))
+        return indices
 
-    clip_model, preprocess = clip.load("ViT-B/32", device=device)
+    indices = get_stratified_split(row_data)
+    train_row_data = []
+    test_row_data = []
+    for i in range(len(row_data)):
+        if i in indices:
+            train_row_data.append(row_data[i])
+        else:
+            test_row_data.append(row_data[i])
 
-    data = ROCOFeatureDataset("train", "/data/ossowski/ROCO", device=device)
-    train_loader = DataLoader(data, 1, shuffle=True, num_workers=2)
+    # For now, just use all data for retrieval
+    train_df = pd.DataFrame(row_data)
+    test_df = pd.DataFrame(row_data)
+    train_df.columns = col_names
+    test_df.columns = col_names
 
-    os.makedirs(os.path.join("cache", "ROCOFeatureDataset"), exist_ok=True)
-    embedding_path = os.path.join("cache", "ROCOFeatureDataset", "embedding.pt")
-    answer_path = os.path.join("cache", "ROCOFeatureDataset", "answers.pkl")
-    answer_type_path = os.path.join("cache", "ROCOFeatureDataset", "answer_types.pkl")
-
-    print(f"Creating qa pairs in {os.path.join('cache', 'ROCOFeatureDataset')} ...")
-    all_embeddings = []
-    all_answers = []
-    all_answer_types = []
-    for batch in tqdm(train_loader):
-        image_encoding = clip_model.encode_image(batch["image"].to(device))
-        text_encoding = clip_model.encode_text(clip.tokenize(batch["question"]).to(device))
-        answers = batch["answer"]
-        all_embeddings.append(torch.cat([image_encoding,text_encoding], axis=1).detach())
-        all_answers.extend(answers)
-        all_answer_types.extend(batch["question_type"])
-
-    retrieval_embeddings = torch.cat(all_embeddings, axis=0).float()
-    retrieval_answers = all_answers
-    retrieval_answer_types = all_answer_types
-
-    torch.save(retrieval_embeddings, embedding_path)
-    with open(answer_path, 'wb') as f:
-        pickle.dump(all_answers, f)
-    with open(answer_type_path, 'wb') as f:
-        pickle.dump(all_answer_types, f)
-
-
-    # Testing to see if it worked ...
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    data = ROCOFeatureDataset("train", "/data/ossowski/ROCO", device="cpu")
-    train_loader = DataLoader(data, 1, shuffle=True, num_workers=2)
-    print(data)
-    # for batch in train_loader:
-    #     print(batch["question"], batch["answer"])
-    # plt.figure(figsize=(20,20))
-    # plt.imshow(image)
-    # plt.title(row_data[idx][2] + "\n" + row_data[idx][3])
-    # plt.savefig("generate_output.png")
+    os.makedirs(os.path.join(sys.argv[2], "ROCO"), exist_ok=True)
+    train_df.to_csv(os.path.join(sys.argv[2], 'train.csv'), index=False)
+    test_df.to_csv(os.path.join(sys.argv[2], 'test.csv'), index=False)

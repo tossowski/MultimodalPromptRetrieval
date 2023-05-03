@@ -1,12 +1,17 @@
-from wsgiref import validate
-from tqdm import tqdm
-from matplotlib import pyplot as plt
 import matplotlib.patches as patches
 import os
 import numpy as np
 import torch
+
+from tqdm import tqdm
+from matplotlib import pyplot as plt
 from copy import deepcopy
 from PIL import Image
+from dataset.SLAKE import VQASLAKEFeatureDataset
+from dataset.VQA_RAD import VQARADFeatureDataset
+from dataset.ROCO import ROCOFeatureDataset
+
+
 
 def get_model_prefix(CFG):
     data_name = CFG["dataset"]
@@ -44,6 +49,9 @@ def get_model_prefix(CFG):
     if "RN" in CFG["vision_encoder"]:
         MODEL_PREFIX += "_resnet"
 
+    if "quantifier" in CFG and not CFG["quantifier"]:
+        MODEL_PREFIX += "_no_quantifier"
+
     return MODEL_PREFIX
 
 def cosine_similarity(x1, x2, dim=1, eps=1e-8):
@@ -74,16 +82,51 @@ def get_validation_loss(model, validate_loader):
     with torch.no_grad():
         for batch in tqdm(validate_loader):
             loss = model(batch)
-            # total_correct_ans += torch.sum(torch.eq(batch["labels"].to(model.device), pred))
-            # total_ans += len(batch["labels"])
             
             total += loss.item() * batch["image"].shape[0]
-        #print(f"Valid acc is: {total_correct_ans / total_ans}")
         return total / len(validate_loader.dataset)
+
+def load_dataset(data_folder, data_name, split, device):
+    dataset = None
+    if data_name == "VQA_RAD":
+        if split == "validate":
+            dataset = VQARADFeatureDataset("train", os.path.join(data_folder, data_name), device=device)
+        else:
+            dataset = VQARADFeatureDataset(split, os.path.join(data_folder, data_name), device=device)
+    elif data_name == "SLAKE":
+        dataset = VQASLAKEFeatureDataset(split, os.path.join(data_folder,data_name), device=device)
+    elif data_name == "ROCO":
+        if split == "train":
+            dataset = ROCOFeatureDataset("train", os.path.join(data_folder,data_name), device=device)
+        else:
+            dataset = ROCOFeatureDataset("test", os.path.join(data_folder,data_name), device=device)
+    elif data_name == "COMBINED":
+        dataset = VQASLAKEFeatureDataset(split, os.path.join(data_folder, "SLAKE"), device=device)
+        if split == "validate":
+            dataset_VQA_RAD = VQARADFeatureDataset("train", os.path.join(data_folder, "VQA_RAD"), device=device)
+        else:
+            dataset_VQA_RAD = VQARADFeatureDataset(split, os.path.join(data_folder, "VQA_RAD"), device=device)
+        dataset.entries.extend(dataset_VQA_RAD.entries)
+        dataset.images.update(dataset_VQA_RAD.images)
+    elif "+" in data_name:
+        datasets = data_name.split("+")
+        combined = None
+        for dset in datasets:
+            new_dset = load_dataset(data_folder, dset, split, device)
+            if combined:
+                combined.entries.extend(new_dset.entries)
+                combined.images.update(new_dset.images)
+            else:
+                combined = new_dset
+        dataset = combined
+    return dataset
+
 
 # Weights are tuple of length n_layers
 # Each entry of tuple is of shape (batch_sz, n_heads, seq_len, seq_len)
-def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
+def visualize_attn_weights(model, batch, attn_type="encoder_attentions", aggregate = False, average_word_pieces = False):
+
+    plt.rcParams.update({'font.size': 34, 'font.weight': "normal"})
 
     combined_embedding, attention_mask, encoding = model.prepare_input(batch)
     n_image_tokens = 50
@@ -106,24 +149,15 @@ def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
         final_tokens_Y = final_tokens_X
     elif attn_type == "cross_attentions":
         final_tokens_Y = model.tokenizer.convert_ids_to_tokens(output_sequences[0])
-        #final_tokens_Y = ["ITK"] * 50 + final_tokens_Y
     
     predicted_answers = model.tokenizer.batch_decode(output_sequences, skip_special_tokens=True)
 
     output = model.T5_model(inputs_embeds = combined_embedding, labels=output_sequences, use_cache=False, output_attentions=True, return_dict=True)
-    
     weights = output[attn_type]
-
-    
-    
     x_ticks = np.linspace(0, weights[0].shape[3] - 1, weights[0].shape[3])
     y_ticks = np.linspace(0, weights[0].shape[2] - 1, weights[0].shape[2])
     
-    
-    print(len(final_tokens_X), len(x_ticks))
     # 6 layers, each layer has 8 attention heads
-    
-
     n_layers = len(weights)
     n_heads = weights[0].shape[1]
     
@@ -140,42 +174,112 @@ def visualize_attn_weights(model, batch, attn_type="encoder_attentions"):
 
     for i in range(n_layers):
         for j in range(n_heads):
-            fig, ax = plt.subplots(1, len(final_tokens_Y) + 1, figsize=(min(len(final_tokens_Y) * 2, 650),20))
-            #if i == 3 and j == 0:
+            
+            if aggregate:
+                fig, ax = plt.subplots(1,2,figsize=(30,10))
+                ax[0].imshow(original_image)
+                ax[0].set_title("Original Image", pad=20)
+                ax[0].set_xlabel(f"What lobe of the brain\nis the legion located in?")
 
-            ax[0].imshow(weights[i][0,j,:,:].detach().cpu().numpy(), vmin=0, vmax=1)
+                ax[1].imshow(original_image)
 
-            ax[0].set_title(batch["question"][0])
-            ax[0].set_xlabel(f"Correct Answer: {batch['answer'][0]} \n Predicted Answer: {predicted_answers[0]}")
-            ax[0].set_xticks(x_ticks)
-            ax[0].set_yticks(y_ticks)
-            ax[0].set_xticklabels(final_tokens_X)
-            ax[0].set_yticklabels(final_tokens_Y)
-            ax[0].tick_params(axis='x', labelrotation = 90)
-            #ax[0].grid()
+                final_alphas = []
+                for k in range(len(final_tokens_Y)):
+   
 
-            for k in range(len(final_tokens_Y)):
-                ax[k + 1].set_title(final_tokens_Y[k])
-                ax[k + 1].imshow(original_image)
-                ax[k + 1].set_xticks(image_x_ticks)
-                ax[k + 1].set_yticks(image_y_ticks)
-
-                if attn_type == "encoder_attentions":
-                    alphas = weights[i][0,j,1:51,k].detach().cpu().numpy()
-                elif attn_type == "cross_attentions":
-                    alphas = weights[i][0,j,k,1:51].detach().cpu().numpy()
-                    
+                    if attn_type == "encoder_attentions":
+                        alphas = weights[i][0,j,1:51,k].detach().cpu().numpy()
+                    elif attn_type == "cross_attentions":
+                        alphas = weights[i][0,j,k,1:51].detach().cpu().numpy()
+                    final_alphas.append(alphas)
+                final_alphas = np.stack(final_alphas, axis = 0)
+                final_alphas = np.mean(final_alphas, axis = 0)
+                final_alphas = (final_alphas - np.min(final_alphas))/ (np.max(final_alphas) - np.min(final_alphas))
                 for l in range(grid_size):
                     for m in range(grid_size):
 
-                        rect = patches.Rectangle((image_x_ticks[m], image_y_ticks[l]), grid_x_length, grid_y_length, linewidth=1, fill=True, facecolor="red", alpha=alphas[grid_size * l + m])
+                        rect = patches.Rectangle((image_x_ticks[m], image_y_ticks[l]), grid_x_length, grid_y_length, linewidth=1, fill=True, facecolor="black", alpha=1-final_alphas[grid_size * l + m])
                         # Add the patch to the Axes
-                        ax[k + 1].add_patch(rect)
-                ax[k + 1].grid()
+                        ax[1].add_patch(rect)
+                        ax[1].set_title("Attention Activation on Image Tokens", pad=20)
+
+                        ax[0].get_yaxis().set_visible(False)
+                        ax[0].set_xticks([])
+                        ax[1].get_yaxis().set_visible(False)
+                        ax[1].set_xticks([])
+
+                        ax[1].set_xlabel(f"Predicted answer: {predicted_answers[0]}\nCorrect answer: {batch['answer'][0]}")
+                plt.tight_layout()
+                plt.subplots_adjust(wspace = 1)
+                os.makedirs(os.path.join("figures", batch["question_id"][0], f"head{j}"), exist_ok=True)
+                plt.savefig(os.path.join("figures", batch["question_id"][0], f"head{j}", f"attention{i}.pdf"))
+            else:
+                lengths = [1,1,2,3,1]
+                words = ["<pad>", "right", "frontal", "lobe", "</s>"]
+                if average_word_pieces:
+                    fig, ax = plt.subplots(1, len(words), figsize=((len(words) + 1) * 6, 8))
+                else:
+                    fig, ax = plt.subplots(1, len(final_tokens_Y) + 2, figsize=(40, 8))
+
+                
+                assert sum(lengths) == len(final_tokens_Y)
+
+                final_alphas = []
+                for k in range(len(final_tokens_Y)):
+   
+
+                    if attn_type == "encoder_attentions":
+                        alphas = weights[i][0,j,1:51,k].detach().cpu().numpy()
+                    elif attn_type == "cross_attentions":
+                        alphas = weights[i][0,j,k,1:51].detach().cpu().numpy()
+                    final_alphas.append(alphas)
+                final_alphas = np.stack(final_alphas, axis = 0)
+                final_alphas = np.mean(final_alphas, axis = 0)
+
+                final_alphas = (final_alphas - np.min(final_alphas))/ (np.max(final_alphas) - np.min(final_alphas))
+
+                if average_word_pieces:
+                    idx_start = 0
+                    for k in range(len(words)):
+                        ax[k].set_xlabel(words[k])
+                        ax[k].imshow(original_image)
+                        ax[k].set_xticks([]) 
+                        ax[k].set_yticks([]) 
+
+                        if attn_type == "encoder_attentions":
+                            alphas = weights[i][0,j,1:51,idx_start:idx_start+lengths[k]].detach().cpu().numpy().mean(axis = -1)
+                        elif attn_type == "cross_attentions":
+                            alphas = weights[i][0,j,idx_start:idx_start+lengths[k],1:51].detach().cpu().numpy().mean(axis = 0)
+                        alphas = (alphas - np.min(alphas)) / (np.max(alphas) - np.min(alphas))
+                        for l in range(grid_size):
+                            for m in range(grid_size):
+
+                                rect = patches.Rectangle((image_x_ticks[m], image_y_ticks[l]), grid_x_length, grid_y_length, linewidth=1, fill=True, facecolor="red", alpha=alphas[grid_size * l + m])
+                                # Add the patch to the Axes
+                                ax[k].add_patch(rect)
+                        idx_start += lengths[k]
+                else:
+                    for k in range(len(final_tokens_Y)):
+                        ax[k + 1].set_title(final_tokens_Y[k])
+                        ax[k + 1].imshow(original_image)
+                        ax[k + 1].set_xticks([]) 
+                        ax[k + 1].set_yticks([]) 
+
+                        if attn_type == "encoder_attentions":
+                            alphas = weights[i][0,j,1:51,k].detach().cpu().numpy()
+                        elif attn_type == "cross_attentions":
+                            alphas = weights[i][0,j,k,1:51].detach().cpu().numpy()
+                        alphas = (alphas - np.min(alphas)) / (np.max(alphas) - np.min(alphas))
+                        for l in range(grid_size):
+                            for m in range(grid_size):
+
+                                rect = patches.Rectangle((image_x_ticks[m], image_y_ticks[l]), grid_x_length, grid_y_length, linewidth=1, fill=True, facecolor="red", alpha=alphas[grid_size * l + m])
+                                # Add the patch to the Axes
+                                ax[k + 1].add_patch(rect)
 
 
-
-            os.makedirs(os.path.join("figures", batch["question_id"][0], f"head{j}"), exist_ok=True)
-            plt.savefig(os.path.join("figures", batch["question_id"][0], f"head{j}", f"attention{i}.png"))
-            plt.close()
-        
+                plt.tight_layout()
+                os.makedirs(os.path.join("figures", batch["question_id"][0], f"head{j}"), exist_ok=True)
+                plt.savefig(os.path.join("figures", batch["question_id"][0], f"head{j}", f"attention{i}.pdf"), dpi=300)
+                plt.close()
+            

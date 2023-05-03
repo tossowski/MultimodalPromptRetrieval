@@ -25,7 +25,7 @@ class QuestionCategoryBucket():
                     questions.append(sample(self.templates, 1)[0])
                     answers.append(keyword)
                 else: # Yes no question
-                    if random.random() > 0.4: # Answer is yes
+                    if random.random() > 0.5: # Answer is yes
                         questions.append(sample(self.templates, 1)[0].format(keyword))
                         answers.append("yes")
                     else:

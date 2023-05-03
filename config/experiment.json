@@ -12,13 +12,16 @@
     "use_prediction_head": 0,
     "freeze": 0,
     "glimpse": 10,
-    "retrieval": 0,
+    "retrieval": 1,
     "use_additional_retrieval_data": 0,
-    "transfer_dataset": "SLAKE",
-    "k": 15,
+    "transfer_dataset": "VQA_RAD",
+    "retrieval_dataset": "VQA_RAD",
+    "k": 1,
+    "quantifier": 1,
     "hyperparameters": {
         "epochs": 200,
         "learning_rate": 0.0001,
         "batch_size": 16
-    }
+    },
+    "further_finetune": 0
 }
