@@ -1,17 +1,22 @@
 # Retrieving Multimodal Prompts for Medical Visual Question Answering
 
-This repository includes the source code for T5vision, a model which optionally integrates visual features or retrieved information into T5 via prompting.
+This repository includes the source code for MPR_Gen, a generative model which optionally integrates visual features or retrieved information into T5 via prompting. This enables rapid zero-shot dataset adapta-
+tion to unseen data distributions and open-set answer labels across datasets.
+
+![architecture](architecture.svg)
+
 
 ## How to use
 ### Setup the environment
-We use conda version 4.13.0 with python 3.9.12 to conduct our experiments. After creating a fresh anaconda environment, you can install the required libraries to run our code with the following command:
+We use conda version 4.13.0 with python 3.9.12 to conduct our experiments. After creating a fresh anaconda environment with this python version or above, you can install the required libraries to run our code with the following commands:
 
 ```
 pip install -r requirements.txt
+pip install git+https://github.com/openai/CLIP.git
 ```
 
 ### Obtain the data
-To reproduce our results, first clone this repository and download the SLAKE dataset from [their website](https://www.med-vqa.com/slake/). Also obtain the image folder, trainset.json, and testset.json files from the data folder at [this github repository](https://github.com/Awenbocc/med-vqa). Once the data has been obtained, organize the data into this directory structure (note, VQA_RAD json files should also be renamed to train.json, test.json):
+To reproduce our results, first clone this repository and download the SLAKE dataset from [their website](https://www.med-vqa.com/slake/). Also obtain the image folder, trainset.json, and testset.json files for VQA_RAD from the data folder at [this github repository](https://github.com/Awenbocc/med-vqa). Once the data has been obtained, organize the data into this directory structure (note, VQA_RAD json files should also be renamed to train.json, test.json):
 
 ```
 data
@@ -34,7 +39,7 @@ data
 ### Setup the config file
 We provide a sample config file in the config folder. You may edit the various entries within it to customize the experiment. Here is a brief explanation of important settings:
 ```
-
+{
     "dataset":                       # The source dataset used for training (SLAKE or VQA_RAD)
     "datafolder":                    # The path to the folder containing the medical VQA datasets
     "use_image_info":                # 0/1 Indicating whether to use the image features in the prompt
@@ -59,11 +64,11 @@ We provide a sample config file in the config folder. You may edit the various e
 ### Run main.py
 To train a model, execute the following command:
 ```
-python main.py --train --config <config_file_name>
+python main.py --train --config <path_to_config_file> --gpu_id <ID of GPU>
 ```
 To test a model, use the following:
 ```
-python main.py --test --config <config_file_name>
+python main.py --test --config <path_to_config_file> --gpu_id <ID of GPU>
 ```
 
 ### Advanced Usage
@@ -77,5 +82,7 @@ python synthetic_data/generate_roco_questions.py <path_to_ROCO_dataset> <path_to
 ```
 This will create a new dataset called ROCO in the same folder as the SLAKE and VQA_RAD datasets. After this step, you can toggle use "ROCO" for the retrieval dataset argument, or optionally toggle the use_additional_data flag in the config file to combine both in-domain and synthetic retrieval data.
 
+### Acknowledgement
+We make use of the following repositories to help in our experiments: [OpenAI CLIP](https://github.com/openai/CLIP), [PubMedCLIP](https://github.com/sarahESL/PubMedCLIP), [Medical VQA with Conditional Reasoning](https://github.com/awenbocc/med-vqa)
 
 

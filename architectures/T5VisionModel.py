@@ -10,9 +10,9 @@ import numpy as np
 
 
 class T5VisionModel(nn.Module):
-    def __init__(self, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None, mapping_checkpoint=None, retrieval_function=None, use_quantifier=True):
+    def __init__(self, device, vision_encoder = "ViT-B/32", T5_version = "t5-small", max_source_length = 512, max_target_length = 128, use_image_info=True, vision_checkpoint=None, mapping_checkpoint=None, retrieval_function=None, use_quantifier=True):
         super().__init__()
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        self.device = device
         #self.device="cpu"
 
         self.vision_encoder = vision_encoder

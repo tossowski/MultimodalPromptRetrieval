@@ -14,8 +14,8 @@
     "glimpse": 10,
     "retrieval": 1,
     "use_additional_retrieval_data": 0,
-    "transfer_dataset": "VQA_RAD",
-    "retrieval_dataset": "VQA_RAD",
+    "transfer_dataset": "SLAKE",
+    "retrieval_dataset": "SLAKE",
     "k": 1,
     "quantifier": 1,
     "hyperparameters": {

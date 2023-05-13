@@ -132,4 +132,5 @@ output/
 outputs/
 slurm*
 data/
+logs/
 saved_*_models/

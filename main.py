@@ -28,6 +28,7 @@ parser.add_argument("--resume", help="Resume model training", action="store_true
 parser.add_argument("--test", help="test a model", action="store_true")
 parser.add_argument("--eval", help="evaluate a model", action="store_true")
 parser.add_argument("--config", help="config file name in the config folder")
+parser.add_argument("--gpu_id", help="ID of GPU")
 parser.add_argument("--model_file", help="optional path to model to save/load")
 parser.add_argument("--qid", help="Question ID to analyze")
 args = parser.parse_args()
@@ -54,7 +55,10 @@ else:
     MODEL_SAVE_PATH = os.path.join(MODEL_SAVE_FOLDER, MODEL_PREFIX + ".pt")
     print(f"Model will be saved/loaded from {MODEL_SAVE_PATH}")
 
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
+if not args.gpu_id or args.gpu_id == "cpu":
+    device = "cpu"
+else:
+    device = f"cuda:{args.gpu_id}" if torch.cuda.is_available() else "cpu"
 max_source_length = CFG["max_source_length"]
 max_target_length = CFG["max_target_length"]
 
@@ -127,18 +131,18 @@ else:
 
 if CFG["use_prediction_head"]:
     if CFG["use_BAN"]:
-        model = T5VisionModelPredictionHeadBAN(len(ans2label), vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, glimpse=CFG["glimpse"], retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)
+        model = T5VisionModelPredictionHeadBAN(device, len(ans2label), vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, glimpse=CFG["glimpse"], retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)
     else:
         if "max_answers" in CFG and CFG["max_answers"]:
-            model = T5VisionModelPredictionHead(CFG["max_answers"], vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)
+            model = T5VisionModelPredictionHead(device, CFG["max_answers"], vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)
         else:
-            model = T5VisionModelPredictionHead(len(ans2label), vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)
+            model = T5VisionModelPredictionHead(device, len(ans2label), vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)
 
 else:
     if CFG["freeze"]:
-        model = T5VisionModelFrozen(vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)   
+        model = T5VisionModelFrozen(device, vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)   
     else:
-        model = T5VisionModel(vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)
+        model = T5VisionModel(device, vision_encoder=CFG["vision_encoder"], T5_version=CFG["T5_version"],use_image_info=use_image_info, vision_checkpoint=CFG["vision_checkpoint"], mapping_checkpoint=None, retrieval_function = retrieval_function, use_quantifier = use_quantifier).to(device)
 
 
 learning_rate = CFG["hyperparameters"]["learning_rate"]
