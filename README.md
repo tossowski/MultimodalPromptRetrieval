@@ -1,7 +1,6 @@
 # Retrieving Multimodal Prompts for Medical Visual Question Answering
 
-This repository includes the source code for MPR_Gen, a generative model which optionally integrates visual features or retrieved information into T5 via prompting. This enables rapid zero-shot dataset adapta-
-tion to unseen data distributions and open-set answer labels across datasets.
+This repository includes the source code for MPR_Gen, a generative model which optionally integrates visual features or retrieved information into T5 via prompting. This enables rapid zero-shot dataset adaptation to unseen data distributions and open-set answer labels across datasets.
 
 ![architecture](architecture.svg)
 
