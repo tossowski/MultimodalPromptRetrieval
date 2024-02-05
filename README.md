@@ -84,4 +84,15 @@ This will create a new dataset called ROCO in the same folder as the SLAKE and V
 ### Acknowledgement
 We make use of the following repositories to help in our experiments: [OpenAI CLIP](https://github.com/openai/CLIP), [PubMedCLIP](https://github.com/sarahESL/PubMedCLIP), [Medical VQA with Conditional Reasoning](https://github.com/awenbocc/med-vqa)
 
+### Citation
+Please feel free to cite our paper if you use our model or results in your research 😊
+
+```bibtex
+@article{ossowski2023multimodal,
+  title={Multimodal Prompt Retrieval for Generative Visual Question Answering},
+  author={Ossowski, Timothy and Hu, Junjie},
+  journal={Findings of the 61st Annual Meeting of the Association for Computational Linguistics},
+  year={2023}
+}
+```
 
